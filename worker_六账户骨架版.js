@@ -11,7 +11,20 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
     try {
-      if (request.method === "GET" && path === "/") return page();
+      // 使用原版管理页面；原版页面本身负责界面，Worker负责提供 /admin/ADD.txt 保存接口。
+      if (request.method === "GET" && (path === "/" || path === "/admin")) {
+        const originalAdmin = "https://" + "edt-pages.github.io/admin";
+        const pageResponse = await fetch(originalAdmin + url.search);
+        const headers = new Headers(pageResponse.headers);
+        headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+        headers.set("Pragma", "no-cache");
+        headers.set("Expires", "0");
+        return new Response(pageResponse.body, {
+          status: pageResponse.status,
+          statusText: pageResponse.statusText,
+          headers
+        });
+      }
       if (request.method === "GET" && path === "/api/usage") return json(await usage(env));
       if (request.method === "GET" && path === "/api/nodes") return json(await nodes(env));
       if (request.method === "POST" && path === "/api/nodes") {
