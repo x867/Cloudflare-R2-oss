@@ -14,11 +14,32 @@ export default {
       if (request.method === "GET" && path === "/") return page();
       if (request.method === "GET" && path === "/api/usage") return json(await usage(env));
       if (request.method === "GET" && path === "/api/nodes") return json(await nodes(env));
-      if (request.method === "POST" && path === "/api/nodes") return json(await addNode(request, env));
+      if (request.method === "POST" && path === "/api/nodes") {
+        const contentType=(request.headers.get("content-type")||"").toLowerCase();
+        if(contentType.includes("application/json")){
+          const b=await request.json().catch(()=>({}));
+          const lines=String(b.ips??b.ip??"").trim();
+          const port=String(b.port??"").trim();
+          if(!lines) throw new Error("IP列表不能为空");
+          if(!port) throw new Error("端口不能为空");
+          const ips=lines.split(/\r?\n|[,，]+/).map(x=>x.trim()).filter(Boolean);
+          const value=ips.map(ip=>ip.includes(":")?ip:ip+":"+port).join("\n");
+          const fake=new Request(request.url,{method:"POST",body:value});
+          return json(await addNode(fake,env));
+        }
+        return json(await addNode(request,env));
+      }
       if (request.method === "DELETE" && path === "/api/nodes") return json(await deleteNode(request, env));
+      if (request.method === "POST" && path === "/admin/ADD.txt") {
+        return json(await addNode(request, env));
+      }
+      if (request.method === "GET" && path === "/admin/ADD.txt") {
+        const raw=await env.KV.get("ADD.txt") || "";
+        return new Response(raw,{headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store"}});
+      }
       if (request.method === "GET" && path === "/sub") {
         const list = (await nodes(env)).nodes;
-        return new Response(list.map(x => `${x.ip}:${x.port}`).join("\n") + (list.length ? "\n" : ""), {
+        return new Response(list.join("\n") + (list.length ? "\n" : ""), {
           headers: {"Content-Type":"text/plain; charset=utf-8"}
         });
       }
@@ -38,76 +59,42 @@ function json(x,status=200){
 }
 
 async function nodes(env){
-  if(!env.KV) throw new Error("KV绑定不存在，请确认生产环境绑定名称为KV");
-
-  const raw=await env.KV.get(NODES_KEY);
-  if(!raw) return {success:true,nodes:[]};
-
-  let list;
-  try{
-    list=JSON.parse(raw);
-  }catch{
-    throw new Error("KV中的nodes.json数据格式错误");
-  }
-
-  if(!Array.isArray(list)) throw new Error("KV中的nodes.json不是数组");
+  if(!env.KV) throw new Error("KV绑定不存在，请确认绑定名称为 KV");
+  const raw=await env.KV.get("ADD.txt") || "";
+  const list=raw.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
   return {success:true,nodes:list};
 }
 
 async function addNode(request,env){
-  if(!env.KV) throw new Error("KV绑定不存在，请确认生产环境绑定名称为KV");
+  if(!env.KV) throw new Error("KV绑定不存在，请确认绑定名称为 KV");
 
-  let body;
-  try{
-    body=await request.json();
-  }catch{
-    throw new Error("保存数据不是有效JSON");
-  }
+  // 与原文件保持一致：直接保存文本到 KV 的 ADD.txt。
+  const text=await request.text();
+  const value=String(text||"").trim();
 
-  const port=String(body?.port??"").trim();
-  const raw=String(body?.ips??"");
-  const ips=[...new Set(
-    raw.split(/[\r\n,，]+/)
-      .map(x=>x.trim())
-      .filter(Boolean)
-  )];
+  if(!value) throw new Error("IP列表不能为空");
 
-  if(!ips.length) throw new Error("IP列表不能为空");
-  if(!port) throw new Error("端口不能为空");
+  await env.KV.put("ADD.txt",value);
 
-  // 不锁死固定端口，只检查为合法数字端口。
-  if(!/^\\d+$/.test(port) || Number(port)<1 || Number(port)>65535){
-    throw new Error("端口必须是1-65535范围内的数字，可填写任意端口");
-  }
-
-  const current=await nodes(env);
-  const list=current.nodes;
-  let added=0;
-
-  for(const ip of ips){
-    if(!list.some(x=>String(x.ip)===ip && String(x.port)===port)){
-      list.push({ip,port});
-      added++;
-    }
-  }
-
-  await env.KV.put(NODES_KEY,JSON.stringify(list));
-  return {success:true,added,nodes:list};
+  return {
+    success:true,
+    message:"自定义IP已保存",
+    nodes:value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean)
+  };
 }
 
 async function deleteNode(request,env){
-  if(!env.KV) throw new Error("KV绑定不存在，请确认生产环境绑定名称为KV");
+  if(!env.KV) throw new Error("KV绑定不存在，请确认绑定名称为 KV");
 
   const u=new URL(request.url);
-  const ip=(u.searchParams.get("ip")||"").trim();
-  const port=(u.searchParams.get("port")||"").trim();
+  const target=(u.searchParams.get("node")||"").trim();
+  const raw=await env.KV.get("ADD.txt") || "";
 
-  const list=(await nodes(env)).nodes.filter(
-    x=>!(String(x.ip)===ip && String(x.port)===port)
-  );
+  const list=raw.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  const next=list.filter(x=>x!==target);
 
-  await env.KV.put(NODES_KEY,JSON.stringify(list));
-  return {success:true,nodes:list};
+  await env.KV.put("ADD.txt",next.join("\n"));
+  return {success:true,nodes:next};
 }
 
 function accounts(env){
@@ -237,104 +224,35 @@ async function loadUsage(){
 async function loadNodes(){
   const box=document.getElementById("nodes");
   try{
-    const r=await fetch("/api/nodes",{method:"GET",cache:"no-store"});
-    const d=await r.json();
-    if(!r.ok || !d.success) throw new Error(d.error||"读取节点失败");
-
-    const list=Array.isArray(d.nodes)?d.nodes:[];
+    const r=await fetch("/admin/ADD.txt",{cache:"no-store"});
+    const text=await r.text();
+    const list=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
     box._nodes=list;
-
-    if(!list.length){
-      box.textContent="暂无节点";
-      return;
-    }
-
+    if(!list.length){box.textContent="暂无节点";return;}
     box.innerHTML=list.map((x,i)=>
-      "<div class=\"node-row\">"+
-      "<span>"+escapeHtml(String(x.ip))+":"+escapeHtml(String(x.port))+"</span>"+
-      ' <button type="button" onclick="delNode('+i+')">删除</button>'+
-      "</div>"
+      "<div class='node-row'>"+escapeHtml(x)+
+      " <button type='button' onclick='delNode("+i+")'>删除</button></div>"
     ).join("");
-  }catch(e){
-    box.textContent="错误："+e.message;
-  }
+  }catch(e){box.textContent="错误："+e.message;}
 }
 
 function escapeHtml(s){
-  return s.replace(/[&<>"']/g,ch=>({
+  return String(s).replace(/[&<>"']/g,ch=>({
     "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
   }[ch]));
 }
 
 async function delNode(index){
-  const box=document.getElementById("nodes");
-  const x=(box._nodes||[])[index];
-  if(!x) return;
-
+  const list=document.getElementById("nodes")._nodes||[];
+  const target=list[index];
+  if(!target)return;
   try{
-    const r=await fetch(
-      "/api/nodes?ip="+encodeURIComponent(String(x.ip))+
-      "&port="+encodeURIComponent(String(x.port)),
-      {method:"DELETE"}
-    );
+    const r=await fetch("/api/nodes?node="+encodeURIComponent(target),{method:"DELETE"});
     const d=await r.json();
-    if(!r.ok || !d.success) throw new Error(d.error||"删除失败");
+    if(!r.ok||!d.success)throw new Error(d.error||"删除失败");
     await loadNodes();
-  }catch(e){
-    alert("删除失败："+e.message);
-  }
+  }catch(e){alert("删除失败："+e.message);}
 }
-
-document.getElementById("f").onsubmit=async e=>{
-  e.preventDefault();
-
-  const ips=document.getElementById("ips").value.trim();
-  const port=document.getElementById("port").value.trim();
-
-  if(!ips){
-    alert("请填写IP列表");
-    return;
-  }
-  if(!port){
-    alert("请填写端口");
-    return;
-  }
-
-  const button=e.target.querySelector("button[type=submit]");
-  const oldText=button.textContent;
-  button.disabled=true;
-  button.textContent="保存中...";
-
-  try{
-    const r=await fetch("/api/nodes",{
-      method:"POST",
-      headers:{
-        "Content-Type":"application/json",
-        "Accept":"application/json"
-      },
-      body:JSON.stringify({ips,port})
-    });
-
-    const text=await r.text();
-    let d;
-    try{ d=JSON.parse(text); }
-    catch{ throw new Error("服务器返回的不是JSON："+text.slice(0,200)); }
-
-    if(!r.ok || !d.success){
-      throw new Error(d.error||("HTTP "+r.status));
-    }
-
-    document.getElementById("ips").value="";
-    document.getElementById("port").value="";
-    await loadNodes();
-    alert("保存成功，共新增 "+d.added+" 个节点");
-  }catch(e){
-    alert("保存失败："+e.message);
-  }finally{
-    button.disabled=false;
-    button.textContent=oldText;
-  }
-};
 
 const sub=new URL("/sub",location.href);
 document.getElementById("sub").href=sub;
