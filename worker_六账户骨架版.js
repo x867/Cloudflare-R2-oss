@@ -197,7 +197,7 @@ async function subscription(request, env, url) {
   // 对齐原版 PATH/完整节点路径的基本规则：保留查询参数，并支持 0RTT。
   let pathValue = String(env.PATH || config.PATH || "/").trim();
   if (!pathValue.startsWith("/")) pathValue = "/" + pathValue;
-  pathValue = pathValue.replace(/\\/+$/, "") || "/";
+  pathValue = pathValue.replace(/\/+$/, "") || "/";
   if (config.启用0RTT) {
     pathValue += (pathValue.includes("?") ? "&" : "?") + "ed=2560";
   }
