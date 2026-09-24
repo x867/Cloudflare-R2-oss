@@ -183,17 +183,24 @@ async function subscription(request, env, url) {
     config = {};
   }
 
-  const host = String(
-    config.HOST ||
-    env.HOST ||
-    url.hostname
-  ).trim().replace(/^https?:\/\//i, "").split("/")[0].split(":")[0];
+  // 与原版 Worker 保持一致：HOST 取环境变量或当前请求 hostname，
+  // 不使用 config.json 里可能残留的旧 HOST。节点 IP 是连接地址，HOST 同时作为 TLS SNI/WS Host。
+  const hostList = String(env.HOST || url.hostname)
+    .split(/[,\\n\\r]+/)
+    .map(h => h.trim().replace(/^https?:\/\//i, "").split("/")[0].split(":")[0].toLowerCase())
+    .filter(Boolean);
+  const host = hostList[0] || url.hostname;
 
   const protocol = String(config.协议类型 || "vless").toLowerCase();
   const transport = String(config.传输协议 || "ws").toLowerCase();
-  const pathValue = String(config.PATH || env.PATH || "/").startsWith("/")
-    ? String(config.PATH || env.PATH || "/")
-    : "/" + String(config.PATH || env.PATH || "/");
+
+  // 对齐原版 PATH/完整节点路径的基本规则：保留查询参数，并支持 0RTT。
+  let pathValue = String(env.PATH || config.PATH || "/").trim();
+  if (!pathValue.startsWith("/")) pathValue = "/" + pathValue;
+  pathValue = pathValue.replace(/\\/+$/, "") || "/";
+  if (config.启用0RTT) {
+    pathValue += (pathValue.includes("?") ? "&" : "?") + "ed=2560";
+  }
   const fingerprint = String(config.Fingerprint || "chrome");
   const insecure = config.跳过证书验证 ? "&insecure=1&allowInsecure=1" : "";
   const list = await getNodes(env);
@@ -232,8 +239,7 @@ async function subscription(request, env, url) {
       type = "xhttp&mode=stream-one";
     }
 
-    let nodePath = pathValue;
-    if (config.随机路径) nodePath = pathValue;
+    const nodePath = pathValue;
 
     const ech = config.ECH && config.ECHConfig
       ? "&ech=" + encodeURIComponent(
