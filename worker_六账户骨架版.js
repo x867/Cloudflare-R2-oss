@@ -186,15 +186,14 @@ input{width:220px}table{width:100%;border-collapse:collapse}td,th{border-bottom:
 </div>
 
 <div class="card">
-<h2>IP列表 + 端口</h2>
-<div class="hint">IP 一行一个，也支持逗号分隔；端口由你自己填写，不锁死固定端口。</div>
+<h2>IP列表</h2>
+<div class="hint">这里直接使用原来的 ADD.txt 保存方式：一行一个完整节点，IP 后面直接填写端口，例如 1.2.3.4:443。端口不锁死，按你填写的保存。</div>
 <form id="f">
 <textarea id="ips" placeholder="例如：
-1.2.3.4
-5.6.7.8
-8.8.8.8" required></textarea>
-<input id="port" placeholder="端口，例如 443" inputmode="numeric" required>
-<button type="submit">批量保存</button>
+1.2.3.4:443
+5.6.7.8:80
+8.8.8.8:2053" required></textarea>
+<button type="submit">保存IP列表</button>
 </form>
 </div>
 
@@ -221,6 +220,19 @@ async function loadUsage(){
     box.innerHTML=h;
   }catch(e){box.textContent="错误："+e.message}
 }
+document.getElementById("f").addEventListener("submit",async e=>{
+  e.preventDefault();
+  const value=document.getElementById("ips").value.trim();
+  if(!value){alert("IP列表不能为空");return;}
+  try{
+    const r=await fetch("/admin/ADD.txt",{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:value});
+    const d=await r.json();
+    if(!r.ok||!d.success)throw new Error(d.error||"保存失败");
+    alert("IP列表已保存");
+    await loadNodes();
+  }catch(e){alert("保存失败："+e.message);}
+});
+
 async function loadNodes(){
   const box=document.getElementById("nodes");
   try{
@@ -254,6 +266,7 @@ async function delNode(index){
   }catch(e){alert("删除失败："+e.message);}
 }
 
+document.getElementById("ips").value="";
 const sub=new URL("/sub",location.href);
 document.getElementById("sub").href=sub;
 document.getElementById("sub").textContent=sub;
