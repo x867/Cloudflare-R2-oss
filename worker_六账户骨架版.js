@@ -62,6 +62,12 @@ export default {
         }
       }
 
+      if (path === "/api/sub-token" && request.method === "GET") {
+        const userID = await getSubscriptionUserID(env);
+        const token = await MD5MD5(url.hostname + userID);
+        return json({ success: true, token });
+      }
+
       if (path === "/sub" && request.method === "GET") {
         return subscription(request, env, url);
       }
@@ -252,22 +258,44 @@ async function save(){
     showMsg("保存成功");
   }catch(e){showMsg("保存失败："+e.message)}
 }
-async function copySub(){
+let subToken="";
+function showSubMsg(text){
+  const m=document.getElementById("subMsg");
+  m.textContent=text;
+  m.style.display="block";
+  setTimeout(()=>m.style.display="none",2000);
+}
+async function getSubToken(){
+  if(subToken)return subToken;
+  try{
+    const r=await fetch("/api/sub-token?_="+Date.now());
+    const d=await r.json();
+    if(!r.ok||!d.success)throw Error(d.error||"获取TOKEN失败");
+    subToken=d.token;
+    return subToken;
+  }catch(e){
+    showSubMsg("获取订阅TOKEN失败："+e.message);
+    return "";
+  }
+}
+function subURL(){
   const q=document.getElementById("subType").value;
-  const u=location.origin+"/sub"+q;
+  const sep=q ? "&" : "?";
+  return location.origin+"/sub"+q+sep+"token="+encodeURIComponent(subToken);
+}
+async function copySub(){
+  if(!await getSubToken())return;
+  const u=subURL();
   try{
     await navigator.clipboard.writeText(u);
-    const m=document.getElementById("subMsg");
-    m.textContent="订阅地址已复制";
-    m.style.display="block";
-    setTimeout(()=>m.style.display="none",2000);
+    showSubMsg("订阅地址已复制");
   }catch(e){
     prompt("复制订阅地址：",u);
   }
 }
-function updateSubLink(){
-  const q=document.getElementById("subType").value;
-  document.getElementById("subLink").href="/sub"+q;
+async function updateSubLink(){
+  if(!await getSubToken())return;
+  document.getElementById("subLink").href=subURL();
 }
 document.getElementById("subType").addEventListener("change",updateSubLink);
 updateSubLink();
