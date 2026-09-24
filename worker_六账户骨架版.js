@@ -129,6 +129,7 @@ function buildVLESSLink(ipPort, uuid, host, path) {
   params.set('security', 'tls');
   params.set('sni', host);
   params.set('fp', 'chrome');
+  params.set('alpn', 'http/1.1');
   params.set('type', 'ws');
   params.set('host', host);
   params.set('path', path);
@@ -300,52 +301,183 @@ async function accountUsage(account,index,start,end,limit) {
 async function handleVLESSWebSocket(request, uuid) {
   const pair = new WebSocketPair();
   const client = pair[0], server = pair[1];
-  server.accept(); server.binaryType = "arraybuffer";
-  let remote = null, first = true;
-  const fail = () => { try { server.close(); } catch (_) {} try { remote?.close?.(); } catch (_) {} };
-  server.addEventListener("message", async event => {
+  server.accept();
+  server.binaryType = "arraybuffer";
+
+  let remote = null;
+  let remoteWriter = null;
+  let connected = false;
+  let closed = false;
+  let headerSent = false;
+  let buffer = new Uint8Array(0);
+
+  const closeAll = () => {
+    if (closed) return;
+    closed = true;
+    try { remoteWriter?.releaseLock(); } catch (_) {}
+    remoteWriter = null;
+    try { remote?.close?.(); } catch (_) {}
+    try { server.close(); } catch (_) {}
+  };
+
+  const send = data => {
+    if (closed || server.readyState !== WebSocket.OPEN) return;
+    try { server.send(data); } catch (_) { closeAll(); }
+  };
+
+  const connectRemote = async parsed => {
+    if (connected) return;
+    connected = true;
+    remote = connect({ hostname: parsed.host, port: parsed.port });
+    await remote.opened;
+    remoteWriter = remote.writable.getWriter();
+
+    // VLESS response header: version + addons length.
+    send(new Uint8Array([parsed.version, 0]));
+
+    if (parsed.payload.byteLength) {
+      await remoteWriter.write(parsed.payload);
+    }
+
+    const reader = remote.readable.getReader();
     try {
-      const data = new Uint8Array(event.data instanceof ArrayBuffer ? event.data : await event.data.arrayBuffer());
-      if (first) {
-        first = false;
-        const parsed = parseVLESSHeader(data, uuid);
-        if (!parsed) return fail();
-        remote = connect({ hostname: parsed.host, port: parsed.port });
-        await remote.opened;
-        if (parsed.payload.length) { const w = remote.writable.getWriter(); await w.write(parsed.payload); w.releaseLock(); }
-        pipeRemoteToWebSocket(remote, server);
-      } else if (remote) { const w = remote.writable.getWriter(); await w.write(data); w.releaseLock(); }
-    } catch (_) { fail(); }
+      while (!closed) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value?.byteLength) send(value);
+      }
+    } finally {
+      try { reader.releaseLock(); } catch (_) {}
+      closeAll();
+    }
+  };
+
+  const consume = async data => {
+    if (closed) return;
+
+    const chunk = data instanceof Uint8Array
+      ? data
+      : data instanceof ArrayBuffer
+        ? new Uint8Array(data)
+        : ArrayBuffer.isView(data)
+          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          : new Uint8Array(await data.arrayBuffer());
+
+    if (!chunk.byteLength) return;
+
+    if (!connected) {
+      buffer = mergeBytes(buffer, chunk);
+      const parsed = parseVLESSHeader(buffer, uuid);
+      if (!parsed) {
+        // A VLESS header can be split across WebSocket frames.
+        if (buffer.byteLength < 2048) return;
+        return closeAll();
+      }
+      buffer = new Uint8Array(0);
+      try {
+        await connectRemote(parsed);
+      } catch (_) {
+        closeAll();
+      }
+      return;
+    }
+
+    try {
+      if (!remoteWriter) remoteWriter = remote.writable.getWriter();
+      await remoteWriter.write(chunk);
+    } catch (_) {
+      closeAll();
+    }
+  };
+
+  // v2rayN/Xray can put the first VLESS packet into
+  // Sec-WebSocket-Protocol as base64url early data.
+  const early = request.headers.get("sec-websocket-protocol") || "";
+  if (early) {
+    try {
+      const raw = early.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = raw + "=".repeat((4 - raw.length % 4) % 4);
+      const bin = atob(padded);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      await consume(bytes);
+    } catch (_) {
+      // Some clients use Sec-WebSocket-Protocol for the literal "binary".
+      // Do not treat that as VLESS early data.
+      if (early !== "binary") closeAll();
+    }
+  }
+
+  server.addEventListener("message", event => {
+    consume(event.data).catch(() => closeAll());
   });
-  server.addEventListener("close", () => { try { remote?.close?.(); } catch (_) {} });
+  server.addEventListener("close", closeAll);
+  server.addEventListener("error", closeAll);
+
   return new Response(null, { status: 101, webSocket: client });
 }
-function parseVLESSHeader(data, expectedUUID) {
-  if (data.length < 24 || data[0] !== 1) return null;
-  const hex = expectedUUID.replace(/-/g, ""); if (!/^[0-9a-f]{32}$/i.test(hex)) return null;
-  for (let i=0;i<16;i++) if (data[1+i] !== parseInt(hex.slice(i*2,i*2+2),16)) return null;
-  const optLen=data[17]; let p=18+optLen; if(p+4>data.length)return null;
-  if(data[p++]!==1)return null;
-  const port=(data[p]<<8)|data[p+1]; p+=2; const atype=data[p++]; let host="";
-  if(atype===1){if(p+4>data.length)return null;host=Array.from(data.slice(p,p+4)).join(".");p+=4;}
-  else if(atype===2){if(p>=data.length)return null;const len=data[p++];if(p+len>data.length)return null;host=new TextDecoder().decode(data.slice(p,p+len));p+=len;}
-  else if(atype===3){if(p+16>data.length)return null;const parts=[];for(let i=0;i<16;i+=2)parts.push(((data[p+i]<<8)|data[p+i+1]).toString(16));host=parts.join(":");p+=16;}
-  else return null;
-  return {host,port,payload:data.slice(p)};
+
+function mergeBytes(a, b) {
+  const x = a instanceof Uint8Array ? a : new Uint8Array(a || 0);
+  const y = b instanceof Uint8Array ? b : new Uint8Array(b || 0);
+  const out = new Uint8Array(x.byteLength + y.byteLength);
+  out.set(x, 0);
+  out.set(y, x.byteLength);
+  return out;
 }
-async function pipeRemoteToWebSocket(remote, server) {
-  try {
-    // VLESS 服务端响应头：version=0，addons length=0。
-    // v2rayN 等客户端会等待这两个字节后才开始接收远端数据。
-    server.send(new Uint8Array([0, 0]));
-    const reader = remote.readable.getReader();
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (value?.byteLength) server.send(value);
-    }
-  } catch (_) {} finally {
-    try { server.close(); } catch (_) {}
-    try { remote.close(); } catch (_) {}
+
+function parseVLESSHeader(data, expectedUUID) {
+  if (!(data instanceof Uint8Array)) data = new Uint8Array(data || 0);
+  if (data.length < 24 || data[0] !== 1) return null;
+
+  const hex = String(expectedUUID).replace(/-/g, "");
+  if (!/^[0-9a-f]{32}$/i.test(hex)) return null;
+
+  for (let i = 0; i < 16; i++) {
+    if (data[1 + i] !== parseInt(hex.slice(i * 2, i * 2 + 2), 16)) return null;
   }
+
+  const optLen = data[17];
+  let p = 18 + optLen;
+  if (p + 4 > data.length) return null;
+
+  const cmd = data[p++];
+  if (cmd !== 1 && cmd !== 2) return null;
+
+  const port = (data[p] << 8) | data[p + 1];
+  p += 2;
+
+  const atype = data[p++];
+  let host = "";
+
+  if (atype === 1) {
+    if (p + 4 > data.length) return null;
+    host = Array.from(data.slice(p, p + 4)).join(".");
+    p += 4;
+  } else if (atype === 2) {
+    if (p >= data.length) return null;
+    const len = data[p++];
+    if (p + len > data.length) return null;
+    host = new TextDecoder().decode(data.slice(p, p + len));
+    p += len;
+  } else if (atype === 3) {
+    if (p + 16 > data.length) return null;
+    const parts = [];
+    for (let i = 0; i < 16; i += 2) {
+      parts.push(((data[p + i] << 8) | data[p + i + 1]).toString(16));
+    }
+    host = parts.join(":");
+    p += 16;
+  } else {
+    return null;
+  }
+
+  if (!host || !port) return null;
+
+  return {
+    version: data[0],
+    host,
+    port,
+    payload: data.slice(p)
+  };
 }
