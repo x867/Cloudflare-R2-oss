@@ -170,34 +170,99 @@ async function subscription(request, env, url) {
   }
 
   const ua = (request.headers.get("User-Agent") || "").toLowerCase();
-  const isBase64 = url.searchParams.has("b64") || url.searchParams.has("base64");
-  const target = url.searchParams.get("target") || "";
+  const isBase64 = url.searchParams.has("b64") || url.searchParams.has("base64") || url.searchParams.get("target") === "base64";
+
+  // 直接读取原版 Worker 留在同一个 KV 里的 config.json。
+  // 这样订阅会沿用原版的 HOST、PATH、协议类型、Fingerprint 等关键参数，
+  // 不再强制写死成“Worker 域名 + VLESS/WS + /”。
+  let config = {};
+  try {
+    const saved = await env.KV.get("config.json");
+    if (saved) config = JSON.parse(saved);
+  } catch (e) {
+    config = {};
+  }
+
+  const host = String(
+    config.HOST ||
+    env.HOST ||
+    url.hostname
+  ).trim().replace(/^https?:\\/\\//i, "").split("/")[0].split(":")[0];
+
+  const protocol = String(config.协议类型 || "vless").toLowerCase();
+  const transport = String(config.传输协议 || "ws").toLowerCase();
+  const pathValue = String(config.PATH || env.PATH || "/").startsWith("/")
+    ? String(config.PATH || env.PATH || "/")
+    : "/" + String(config.PATH || env.PATH || "/");
+  const fingerprint = String(config.Fingerprint || "chrome");
+  const insecure = config.跳过证书验证 ? "&insecure=1&allowInsecure=1" : "";
   const list = await getNodes(env);
 
   const links = list.map(node => {
     const item = parseNode(node);
     if (!item) return null;
 
-    // 按原版本地 mixed 订阅的节点结构生成，再将占位 UUID/域名替换为当前 Worker 的实际值。
-    const path = "/";
-    const link =
-      `vless://00000000-0000-4000-8000-000000000000@${item.address}:${item.port}?security=tls&type=ws&host=example.com&fp=chrome&sni=example.com&path=${encodeURIComponent(path)}&encryption=none#${encodeURIComponent(item.remark)}`;
+    const remark = encodeURIComponent(item.remark);
+    const uuid = userID;
 
-    return link
-      .replace(/00000000-0000-4000-8000-000000000000/g, userID)
-      .replaceAll("example.com", url.hostname);
+    if (protocol === "ss") {
+      const method = String(config?.SS?.加密方式 || "aes-128-gcm");
+      const tls = config?.SS?.TLS !== false;
+      const pluginPath = pathValue;
+      const plugin = "v2" + encodeURIComponent(
+        "ray-plugin;mode=websocket;host=" + host +
+        ";path=" + pluginPath +
+        (tls ? ";tls" : "")
+      );
+      return "ss://" +
+        btoa(method + ":" + uuid) +
+        "@" + item.address + ":" + item.port +
+        "?plugin=" + plugin + "#" + remark;
+    }
+
+    let type = "ws";
+    let pathKey = "path";
+    let hostKey = "host";
+
+    if (transport === "grpc") {
+      type = config.gRPC模式 === "multi" ? "grpc&mode=multi" : "grpc&mode=gun";
+      pathKey = "serviceName";
+      hostKey = "authority";
+    } else if (transport === "xhttp") {
+      type = "xhttp&mode=stream-one";
+    }
+
+    let nodePath = pathValue;
+    if (config.随机路径) nodePath = pathValue;
+
+    const ech = config.ECH && config.ECHConfig
+      ? "&ech=" + encodeURIComponent(
+          (config.ECHConfig.SNI ? config.ECHConfig.SNI + "+" : "") +
+          (config.ECHConfig.DNS || "")
+        )
+      : "";
+
+    return "vless://" + uuid + "@" + item.address + ":" + item.port +
+      "?security=tls&type=" + type +
+      ech +
+      "&" + hostKey + "=" + encodeURIComponent(host) +
+      "&fp=" + encodeURIComponent(fingerprint) +
+      "&sni=" + encodeURIComponent(host) +
+      "&" + pathKey + "=" + encodeURIComponent(nodePath) +
+      "&encryption=none" + insecure +
+      "#" + remark;
   }).filter(Boolean);
 
   let content = links.join("\n");
   if (content) content += "\n";
 
-  if (isBase64 || target === "base64") {
+  if (isBase64) {
     content = btoa(unescape(encodeURIComponent(content)));
   }
 
   const headers = {
     "Content-Type": "text/plain; charset=utf-8",
-    "Profile-Update-Interval": "6",
+    "Profile-Update-Interval": String(config?.优选订阅生成?.SUBUpdateTime || 6),
     "Profile-web-page-url": url.protocol + "//" + url.host + "/admin",
     "Subscription-Userinfo": "upload=0; download=0; total=0; expire=4102329600",
     "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate"
@@ -209,7 +274,6 @@ async function subscription(request, env, url) {
 
   return new Response(content, { headers });
 }
-
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
