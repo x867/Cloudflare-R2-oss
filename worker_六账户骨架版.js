@@ -295,12 +295,13 @@ async function saveIPs(){
   const value=document.getElementById("ips").value.trim();
   if(!value){alert("IP列表不能为空");return;}
   try{
-    const r=await fetch("/api/nodes",{
+    // 按原始版本：直接把文本保存到 ADD.txt，不经过 JSON/端口转换。
+    const r=await fetch("/admin/ADD.txt",{
       method:"POST",
-      headers:{"Content-Type":"application/json;charset=utf-8"},
-      body:JSON.stringify({ips:value})
+      headers:{"Content-Type":"text/plain; charset=utf-8"},
+      body:value
     });
-    const d=await r.json();
+    const d=await r.json().catch(()=>({}));
     if(!r.ok||!d.success) throw new Error(d.error||"保存失败");
     lastSaved=value;
     editorDirty=false;
