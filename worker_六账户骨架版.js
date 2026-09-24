@@ -118,29 +118,35 @@ button{padding:9px 18px;margin:10px 8px 0 0;cursor:pointer}
 <p>一行一个 IP:端口，例如 172.64.229.0:443</p>
 <textarea id="ips" placeholder="172.64.229.0:443"></textarea><br>
 <button onclick="save()">保存</button>
-<div id="msg"></div>
+<div id="msg" style="display:none"></div>
 </div>
 <script>
 const el=document.getElementById("ips"),msg=document.getElementById("msg");
+let msgTimer;
+function showMsg(text,ms=2000){
+  clearTimeout(msgTimer);
+  msg.textContent=text;
+  msg.style.display="block";
+  msgTimer=setTimeout(()=>{msg.style.display="none";msg.textContent=""},ms);
+}
+el.addEventListener("input",()=>{msg.style.display="none";clearTimeout(msgTimer)});
 async function load(){
   try{
     const r=await fetch("/admin/ADD.txt?_="+Date.now());
     if(!r.ok)throw Error("读取失败");
     el.value=await r.text();
-    msg.textContent="已读取";
-  }catch(e){msg.textContent=e.message}
+  }catch(e){}
 }
 async function save(){
   const text=el.value;
-  if(!text.trim()){msg.textContent="IP列表不能为空";return}
+  if(!text.trim()){showMsg("IP列表不能为空");return}
   try{
     const r=await fetch("/admin/ADD.txt",{method:"POST",body:text});
     const d=await r.json();
     if(!r.ok||!d.success)throw Error(d.error||"保存失败");
-    msg.textContent="保存成功";
-  }catch(e){msg.textContent="保存失败："+e.message}
+    showMsg("保存成功");
+  }catch(e){showMsg("保存失败："+e.message)}
 }
-function sub(){window.open("/sub","_blank")}
 load();
 </script>
 </body>
