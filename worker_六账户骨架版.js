@@ -300,100 +300,183 @@ async function accountUsage(account,index,start,end,limit) {
 
 async function handleVLESSWebSocket(request, uuid) {
   const pair = new WebSocketPair();
-  const client = pair[0], server = pair[1];
-  server.accept();
+  const client = pair[0];
+  const server = pair[1];
+
+  // WebSocket 代理场景允许半关闭，避免运行时在一侧 EOF 时过早关闭另一侧。
+  server.accept({ allowHalfOpen: true });
   server.binaryType = "arraybuffer";
 
   let remote = null;
   let remoteWriter = null;
-  let connected = false;
+  let remoteReader = null;
   let closed = false;
-  let headerSent = false;
-  let buffer = new Uint8Array(0);
+  let parsed = null;
+  let headerBuffer = new Uint8Array(0);
+  let connecting = null;
 
-  const closeAll = () => {
+  const toBytes = data => {
+    if (data instanceof Uint8Array) return data;
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    return new Uint8Array(data || 0);
+  };
+
+  const safeClose = () => {
     if (closed) return;
     closed = true;
+    try { remoteReader?.releaseLock(); } catch (_) {}
+    remoteReader = null;
     try { remoteWriter?.releaseLock(); } catch (_) {}
     remoteWriter = null;
     try { remote?.close?.(); } catch (_) {}
-    try { server.close(); } catch (_) {}
-  };
-
-  const send = data => {
-    if (closed || server.readyState !== WebSocket.OPEN) return;
-    try { server.send(data); } catch (_) { closeAll(); }
-  };
-
-  const connectRemote = async parsed => {
-    if (connected) return;
-    connected = true;
-    remote = connect({ hostname: parsed.host, port: parsed.port });
-    await remote.opened;
-    remoteWriter = remote.writable.getWriter();
-
-    // VLESS response header: version + addons length.
-    send(new Uint8Array([parsed.version, 0]));
-
-    if (parsed.payload.byteLength) {
-      await remoteWriter.write(parsed.payload);
-    }
-
-    const reader = remote.readable.getReader();
     try {
-      while (!closed) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (value?.byteLength) send(value);
+      if (server.readyState === WebSocket.OPEN || server.readyState === WebSocket.CLOSING) {
+        server.close();
       }
-    } finally {
-      try { reader.releaseLock(); } catch (_) {}
-      closeAll();
+    } catch (_) {}
+  };
+
+  const wsSend = async data => {
+    if (closed || server.readyState !== WebSocket.OPEN) return false;
+    try {
+      const payload = toBytes(data);
+      if (payload.byteLength) server.send(payload);
+      return true;
+    } catch (e) {
+      console.error("[VLESS WS] send failed:", e?.message || e);
+      safeClose();
+      return false;
     }
+  };
+
+  const waitOpened = async socket => {
+    await Promise.race([
+      socket.opened,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("TCP connect timeout")), 10000)
+      )
+    ]);
+  };
+
+  const pumpRemoteToWS = async () => {
+    if (!remote) return;
+    try {
+      remoteReader = remote.readable.getReader();
+      while (!closed) {
+        const { value, done } = await remoteReader.read();
+        if (done) break;
+        if (value?.byteLength) {
+          if (!(await wsSend(value))) break;
+        }
+      }
+    } catch (e) {
+      if (!closed) console.error("[VLESS WS] remote read failed:", e?.message || e);
+    } finally {
+      try { remoteReader?.releaseLock(); } catch (_) {}
+      remoteReader = null;
+      if (!closed) safeClose();
+    }
+  };
+
+  const connectRemote = async first => {
+    if (connecting) return connecting;
+
+    connecting = (async () => {
+      try {
+        remote = connect({
+          hostname: first.host,
+          port: first.port
+        });
+
+        await waitOpened(remote);
+
+        if (closed) return;
+
+        remoteWriter = remote.writable.getWriter();
+
+        // VLESS response header = version + addons length.
+        await wsSend(new Uint8Array([first.version, 0]));
+
+        if (first.payload?.byteLength) {
+          await remoteWriter.write(first.payload);
+        }
+
+        // Remote -> WebSocket must run independently of the client message handler.
+        pumpRemoteToWS().catch(() => safeClose());
+      } catch (e) {
+        console.error("[VLESS WS] TCP connect failed:", first.host + ":" + first.port, e?.message || e);
+        safeClose();
+        throw e;
+      } finally {
+        connecting = null;
+      }
+    })();
+
+    return connecting;
   };
 
   const consume = async data => {
     if (closed) return;
 
-    const chunk = data instanceof Uint8Array
-      ? data
-      : data instanceof ArrayBuffer
-        ? new Uint8Array(data)
-        : ArrayBuffer.isView(data)
-          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-          : new Uint8Array(await data.arrayBuffer());
-
+    const chunk = toBytes(data);
     if (!chunk.byteLength) return;
 
-    if (!connected) {
-      buffer = mergeBytes(buffer, chunk);
-      const parsed = parseVLESSHeader(buffer, uuid);
-      if (!parsed) {
-        // A VLESS header can be split across WebSocket frames.
-        if (buffer.byteLength < 2048) return;
-        return closeAll();
+    // First WebSocket message(s): accumulate until the complete VLESS header exists.
+    if (!parsed) {
+      headerBuffer = mergeBytes(headerBuffer, chunk);
+
+      const candidate = parseVLESSHeader(headerBuffer, uuid);
+
+      if (!candidate) {
+        // Do not close merely because one WebSocket frame contains only part of
+        // the VLESS header. Give fragmented frames room to arrive.
+        if (headerBuffer.byteLength < 4096) return;
+        console.error("[VLESS WS] invalid/oversized VLESS header");
+        safeClose();
+        return;
       }
-      buffer = new Uint8Array(0);
-      try {
-        await connectRemote(parsed);
-      } catch (_) {
-        closeAll();
-      }
+
+      parsed = candidate;
+      headerBuffer = new Uint8Array(0);
+
+      await connectRemote(parsed);
       return;
     }
 
     try {
-      if (!remoteWriter) remoteWriter = remote.writable.getWriter();
+      if (!remoteWriter) {
+        if (!remote) throw new Error("remote socket unavailable");
+        remoteWriter = remote.writable.getWriter();
+      }
       await remoteWriter.write(chunk);
-    } catch (_) {
-      closeAll();
+    } catch (e) {
+      console.error("[VLESS WS] client -> remote failed:", e?.message || e);
+      safeClose();
     }
   };
 
-  // v2rayN/Xray can put the first VLESS packet into
-  // Sec-WebSocket-Protocol as base64url early data.
+  // Keep event-driven WS handling, matching the original Worker architecture.
+  server.addEventListener("message", event => {
+    consume(event.data).catch(e => {
+      console.error("[VLESS WS] message handling failed:", e?.message || e);
+      safeClose();
+    });
+  });
+
+  server.addEventListener("close", () => {
+    safeClose();
+  });
+
+  server.addEventListener("error", event => {
+    console.error("[VLESS WS] websocket error:", event?.error || event);
+    safeClose();
+  });
+
+  // Support Xray/v2rayN WebSocket early-data. Literal "binary" is a
+  // WebSocket subprotocol, not VLESS payload, so ignore it.
   const early = request.headers.get("sec-websocket-protocol") || "";
-  if (early) {
+  if (early && early !== "binary") {
     try {
       const raw = early.replace(/-/g, "+").replace(/_/g, "/");
       const padded = raw + "=".repeat((4 - raw.length % 4) % 4);
@@ -401,22 +484,17 @@ async function handleVLESSWebSocket(request, uuid) {
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       await consume(bytes);
-    } catch (_) {
-      // Some clients use Sec-WebSocket-Protocol for the literal "binary".
-      // Do not treat that as VLESS early data.
-      if (early !== "binary") closeAll();
+    } catch (e) {
+      console.error("[VLESS WS] early-data decode failed:", e?.message || e);
+      safeClose();
     }
   }
 
-  server.addEventListener("message", event => {
-    consume(event.data).catch(() => closeAll());
+  return new Response(null, {
+    status: 101,
+    webSocket: client
   });
-  server.addEventListener("close", closeAll);
-  server.addEventListener("error", closeAll);
-
-  return new Response(null, { status: 101, webSocket: client });
 }
-
 function mergeBytes(a, b) {
   const x = a instanceof Uint8Array ? a : new Uint8Array(a || 0);
   const y = b instanceof Uint8Array ? b : new Uint8Array(b || 0);
