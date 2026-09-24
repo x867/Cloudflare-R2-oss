@@ -199,16 +199,15 @@ async function subscription(request, env, url) {
     .filter(Boolean);
   const host = hostList[0] || url.hostname;
 
-  const protocol = String(config.协议类型 || "vless").toLowerCase();
-  const transport = String(config.传输协议 || "ws").toLowerCase();
+  // 当前 Worker 服务端实际实现的是 VLESS over WebSocket。
+  // 订阅先严格使用同一协议，避免旧 config.json 中的 grpc/xhttp/ECH/0-RTT
+  // 生成出服务端尚未实现的节点。
+  const protocol = "vless";
+  const transport = "ws";
 
-  // 对齐原版 PATH/完整节点路径的基本规则：保留查询参数，并支持 0RTT。
   let pathValue = String(env.PATH || config.PATH || "/").trim();
   if (!pathValue.startsWith("/")) pathValue = "/" + pathValue;
   pathValue = pathValue.replace(/\/+$/, "") || "/";
-  if (config.启用0RTT) {
-    pathValue += (pathValue.includes("?") ? "&" : "?") + "ed=2560";
-  }
   const fingerprint = String(config.Fingerprint || "chrome");
   const insecure = config.跳过证书验证 ? "&insecure=1&allowInsecure=1" : "";
   const list = await getNodes(env);
@@ -235,35 +234,18 @@ async function subscription(request, env, url) {
         "?plugin=" + plugin + "#" + remark;
     }
 
-    let type = "ws";
-    let pathKey = "path";
-    let hostKey = "host";
-
-    if (transport === "grpc") {
-      type = config.gRPC模式 === "multi" ? "grpc&mode=multi" : "grpc&mode=gun";
-      pathKey = "serviceName";
-      hostKey = "authority";
-    } else if (transport === "xhttp") {
-      type = "xhttp&mode=stream-one";
-    }
-
     const nodePath = pathValue;
 
-    const ech = config.ECH && config.ECHConfig
-      ? "&ech=" + encodeURIComponent(
-          (config.ECHConfig.SNI ? config.ECHConfig.SNI + "+" : "") +
-          (config.ECHConfig.DNS || "")
-        )
-      : "";
-
+    // 固定为当前服务端已经实现的 VLESS/TLS/WebSocket。
+    // 优选 IP 只作为连接地址；Host/SNI 使用 Worker 域名。
     return "vless://" + uuid + "@" + item.address + ":" + item.port +
-      "?security=tls&type=" + type +
-      ech +
-      "&" + hostKey + "=" + encodeURIComponent(host) +
-      "&fp=" + encodeURIComponent(fingerprint) +
+      "?encryption=none&security=tls&type=ws" +
+      "&host=" + encodeURIComponent(host) +
       "&sni=" + encodeURIComponent(host) +
-      "&" + pathKey + "=" + encodeURIComponent(nodePath) +
-      "&encryption=none" + insecure +
+      "&alpn=http%2F1.1" +
+      "&fp=" + encodeURIComponent(fingerprint) +
+      "&path=" + encodeURIComponent(nodePath) +
+      insecure +
       "#" + remark;
   }).filter(Boolean);
 
