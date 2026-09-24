@@ -85,18 +85,13 @@ async function nodes(env){
 async function addNode(request,env){
   if(!env.KV) throw new Error("KV绑定不存在，请确认绑定名称为 KV");
 
-  // 与原文件保持一致：直接保存文本到 KV 的 ADD.txt。
-  const text=await request.text();
-  const value=String(text||"").trim();
-
-  if(!value) throw new Error("IP列表不能为空");
-
-  await env.KV.put("ADD.txt",value);
+  // 完全按原版：admin/ADD.txt POST 直接把请求正文写入 ADD.txt。
+  const customIPs = await request.text();
+  await env.KV.put("ADD.txt", customIPs);
 
   return {
     success:true,
-    message:"自定义IP已保存",
-    nodes:value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean)
+    message:"自定义IP已保存"
   };
 }
 
