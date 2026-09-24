@@ -122,7 +122,7 @@ button{padding:9px 18px;margin:10px 8px 0 0;cursor:pointer}
 </div>
 <script>
 const el=document.getElementById("ips"),msg=document.getElementById("msg");
-let msgTimer;
+let msgTimer,lastSaved="";
 function showMsg(text,ms=2000){
   clearTimeout(msgTimer);
   msg.textContent=text;
@@ -134,16 +134,19 @@ async function load(){
   try{
     const r=await fetch("/admin/ADD.txt?_="+Date.now());
     if(!r.ok)throw Error("读取失败");
-    el.value=await r.text();
+    lastSaved=await r.text();
+    el.value=lastSaved;
   }catch(e){}
 }
 async function save(){
   const text=el.value;
   if(!text.trim()){showMsg("IP列表不能为空");return}
+  if(text===lastSaved)return;
   try{
     const r=await fetch("/admin/ADD.txt",{method:"POST",body:text});
     const d=await r.json();
     if(!r.ok||!d.success)throw Error(d.error||"保存失败");
+    lastSaved=text;
     showMsg("保存成功");
   }catch(e){showMsg("保存失败："+e.message)}
 }
