@@ -334,6 +334,18 @@ function parseVLESSHeader(data, expectedUUID) {
   return {host,port,payload:data.slice(p)};
 }
 async function pipeRemoteToWebSocket(remote, server) {
-  try { const reader=remote.readable.getReader(); while(true){const {value,done}=await reader.read();if(done)break;if(value?.byteLength)server.send(value);} }
-  catch (_) {} finally { try{server.close();}catch(_){} try{remote.close();}catch(_){} }
+  try {
+    // VLESS 服务端响应头：version=0，addons length=0。
+    // v2rayN 等客户端会等待这两个字节后才开始接收远端数据。
+    server.send(new Uint8Array([0, 0]));
+    const reader = remote.readable.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value?.byteLength) server.send(value);
+    }
+  } catch (_) {} finally {
+    try { server.close(); } catch (_) {}
+    try { remote.close(); } catch (_) {}
+  }
 }
