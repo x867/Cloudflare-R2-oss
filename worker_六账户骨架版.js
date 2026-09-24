@@ -161,86 +161,168 @@ async function accountUsage(a,index,start,now,limit){
 }
 
 function page(){
-  return new Response(`<!doctype html>
+  return new Response(\`<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>六账户额度 + IP/端口</title>
+<title>自定义优选</title>
 <style>
-body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:900px;margin:30px auto;padding:0 16px;background:#f6f7f9;color:#222}
-.card{background:#fff;border:1px solid #ddd;border-radius:12px;padding:18px;margin:14px 0}
-h1{font-size:24px}button{padding:8px 14px;cursor:pointer}input,textarea{padding:10px;margin-right:8px;box-sizing:border-box}
-textarea{width:100%;min-height:180px;resize:vertical;margin:8px 0 12px}
-input{width:220px}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #eee;padding:8px;text-align:left}
-.hint{color:#666;font-size:14px;margin:6px 0 12px}.node-row{padding:8px 0;border-bottom:1px solid #eee}
+*{box-sizing:border-box}
+body{
+  margin:0;
+  min-height:100vh;
+  background:#f5f7fa;
+  color:#303133;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",Arial,sans-serif;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 22px 40px}
+h1{font-size:24px;font-weight:600;margin:0 0 18px}
+.card{
+  background:#fff;border:1px solid #ebeef5;border-radius:8px;
+  box-shadow:0 2px 12px rgba(0,0,0,.04);padding:20px;margin-bottom:18px
+}
+h2{font-size:20px;font-weight:500;margin:0 0 14px}
+.editor{
+  display:flex;width:100%;height:360px;border:1px solid #dcdfe6;
+  border-radius:6px;overflow:hidden;background:#fff
+}
+.lines{
+  width:48px;flex:0 0 48px;padding:10px 8px 10px 0;
+  background:#f7f8fa;color:#a8abb2;text-align:right;font:14px/22px Consolas,Monaco,monospace;
+  user-select:none;overflow:hidden
+}
+#ips{
+  flex:1;border:0;outline:0;resize:none;padding:10px 12px;
+  margin:0;color:#303133;background:#fff;
+  font:14px/22px Consolas,Monaco,"Microsoft YaHei",monospace;
+  white-space:pre;overflow:auto
+}
+#ips::placeholder{color:#c0c4cc}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+button{
+  min-width:88px;height:36px;padding:0 18px;border:1px solid #dcdfe6;
+  border-radius:4px;background:#fff;color:#606266;cursor:pointer;font-size:14px
+}
+button:hover{border-color:#409eff;color:#409eff}
+.primary{background:#409eff;border-color:#409eff;color:#fff}
+.primary:hover{background:#66b1ff;border-color:#66b1ff;color:#fff}
+.danger{color:#f56c6c}
+.hint{font-size:13px;color:#909399;margin-top:10px}
+#usage{line-height:1.8}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+th,td{border-bottom:1px solid #ebeef5;padding:9px;text-align:left;font-size:14px}
+#nodes{max-height:240px;overflow:auto}
+.node-row{padding:7px 0;border-bottom:1px solid #f0f0f0;font-family:Consolas,monospace}
+.node-row button{min-width:auto;height:30px;padding:0 10px;margin-left:8px}
+.subbox{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.subbox input{flex:1;min-width:260px;height:36px;border:1px solid #dcdfe6;border-radius:4px;padding:0 10px;color:#606266}
+.small{font-size:12px;color:#909399}
 </style>
 </head>
 <body>
-<h1>六账户额度 + IP/端口</h1>
+<div class="wrap">
 
-<div class="card">
-<h2>六账户额度</h2>
-<div id="usage">读取中...</div>
-<button onclick="loadUsage()">刷新额度</button>
-</div>
+  <div class="card">
+    <h1>自定义优选</h1>
 
-<div class="card">
-<h2>IP列表</h2>
-<div class="hint">这里直接使用原来的 ADD.txt 保存方式：一行一个完整节点，IP 后面直接填写端口，例如 1.2.3.4:443。端口不锁死，按你填写的保存。</div>
-<form id="f">
-<textarea id="ips" placeholder="例如：
-1.2.3.4:443
-5.6.7.8:80
-8.8.8.8:2053" required></textarea>
-<button type="submit">保存IP列表</button>
-</form>
-</div>
+    <div class="editor">
+      <div id="lines" class="lines">1</div>
+      <textarea id="ips" spellcheck="false" placeholder="172.64.229.0:443
+172.64.229.1:443
+172.64.229.2:443
+172.64.229.3:443"></textarea>
+    </div>
 
-<div class="card">
-<h2>节点列表</h2>
-<div id="nodes">读取中...</div>
-</div>
+    <div class="actions">
+      <button type="button" class="primary" onclick="startOptimize()">开始优选</button>
+      <button type="button" onclick="showSubscription()">订阅接口</button>
+      <button type="button" onclick="chainProxy()">链式代理</button>
+      <button type="button" class="danger" onclick="cancelEdit()">取消</button>
+      <button type="button" class="primary" onclick="saveIPs()">保存</button>
+    </div>
+    <div class="hint">一行一个完整节点，格式为 IP:端口。端口不锁死，按你填写的端口保存到原来的 ADD.txt。</div>
+  </div>
 
-<div class="card">
-<h2>订阅</h2>
-<a id="sub" target="_blank"></a>
+  <div class="card">
+    <h2>六账户额度</h2>
+    <div id="usage">读取中...</div>
+    <div class="actions"><button type="button" onclick="loadUsage()">刷新额度</button></div>
+  </div>
+
+  <div class="card">
+    <h2>已保存 IP</h2>
+    <div id="nodes">读取中...</div>
+  </div>
+
 </div>
 
 <script>
-async function loadUsage(){
-  const box=document.getElementById("usage");
-  try{
-    const d=await fetch("/api/usage").then(r=>r.json());
-    if(!d.success) throw new Error(d.error||"读取失败");
-    let h="<p>总额度："+d.totalLimit+"　已用："+d.totalUsed+"　剩余："+d.totalRemaining+"</p>";
-    h+="<table><tr><th>账户</th><th>已用</th><th>剩余</th></tr>";
-    for(const x of d.accounts) h+="<tr><td>#"+x.index+" "+x.idMasked+"</td><td>"+x.used+"</td><td>"+x.remaining+"</td></tr>";
-    h+="</table>";
-    box.innerHTML=h;
-  }catch(e){box.textContent="错误："+e.message}
+let lastSaved = "";
+
+function updateLines(){
+  const ta=document.getElementById("ips");
+  const count=Math.max(1,ta.value.split("\\n").length);
+  document.getElementById("lines").textContent=
+    Array.from({length:count},(_,i)=>i+1).join("\\n");
+  document.getElementById("lines").scrollTop=ta.scrollTop;
 }
-document.getElementById("f").addEventListener("submit",async e=>{
-  e.preventDefault();
+document.getElementById("ips").addEventListener("input",updateLines);
+document.getElementById("ips").addEventListener("scroll",()=>{
+  document.getElementById("lines").scrollTop=document.getElementById("ips").scrollTop;
+});
+
+async function loadIPs(){
+  const r=await fetch("/admin/ADD.txt",{cache:"no-store"});
+  if(!r.ok) throw new Error("读取IP列表失败");
+  lastSaved=await r.text();
+  document.getElementById("ips").value=lastSaved;
+  updateLines();
+}
+
+async function saveIPs(){
   const value=document.getElementById("ips").value.trim();
   if(!value){alert("IP列表不能为空");return;}
   try{
-    const r=await fetch("/admin/ADD.txt",{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:value});
+    const r=await fetch("/admin/ADD.txt",{
+      method:"POST",
+      headers:{"Content-Type":"text/plain;charset=utf-8"},
+      body:value
+    });
     const d=await r.json();
-    if(!r.ok||!d.success)throw new Error(d.error||"保存失败");
-    alert("IP列表已保存");
+    if(!r.ok||!d.success) throw new Error(d.error||"保存失败");
+    lastSaved=value;
     await loadNodes();
+    alert("保存成功");
   }catch(e){alert("保存失败："+e.message);}
-});
+}
+
+function cancelEdit(){
+  document.getElementById("ips").value=lastSaved;
+  updateLines();
+}
+
+function showSubscription(){
+  const u=new URL("/sub",location.href).href;
+  window.open(u,"_blank");
+}
+
+function startOptimize(){
+  alert("骨架版暂未接入优选扫描，当前按钮保留原界面；IP列表保存功能已接入 ADD.txt。");
+}
+
+function chainProxy(){
+  alert("骨架版暂未接入链式代理，当前按钮保留原界面。");
+}
 
 async function loadNodes(){
   const box=document.getElementById("nodes");
   try{
     const r=await fetch("/admin/ADD.txt",{cache:"no-store"});
     const text=await r.text();
-    const list=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    const list=text.split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean);
     box._nodes=list;
-    if(!list.length){box.textContent="暂无节点";return;}
+    if(!list.length){box.textContent="暂无保存的IP";return;}
     box.innerHTML=list.map((x,i)=>
       "<div class='node-row'>"+escapeHtml(x)+
       " <button type='button' onclick='delNode("+i+")'>删除</button></div>"
@@ -249,7 +331,7 @@ async function loadNodes(){
 }
 
 function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g,ch=>({
+  return String(s).replace(/[&<>\"']/g,ch=>({
     "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
   }[ch]));
 }
@@ -262,17 +344,32 @@ async function delNode(index){
     const r=await fetch("/api/nodes?node="+encodeURIComponent(target),{method:"DELETE"});
     const d=await r.json();
     if(!r.ok||!d.success)throw new Error(d.error||"删除失败");
+    await loadIPs();
     await loadNodes();
   }catch(e){alert("删除失败："+e.message);}
 }
 
-document.getElementById("ips").value="";
-const sub=new URL("/sub",location.href);
-document.getElementById("sub").href=sub;
-document.getElementById("sub").textContent=sub;
-loadUsage();
-loadNodes();
+async function loadUsage(){
+  const box=document.getElementById("usage");
+  try{
+    const d=await fetch("/api/usage",{cache:"no-store"}).then(r=>r.json());
+    if(!d.success) throw new Error(d.error||"读取失败");
+    let h="<p>总额度："+d.totalLimit+"　已用："+d.totalUsed+"　剩余："+d.totalRemaining+"</p>";
+    h+="<table><tr><th>账户</th><th>已用</th><th>剩余</th></tr>";
+    for(const x of d.accounts)
+      h+="<tr><td>#"+x.index+" "+x.idMasked+"</td><td>"+x.used+"</td><td>"+x.remaining+"</td></tr>";
+    h+="</table>";
+    box.innerHTML=h;
+  }catch(e){box.textContent="错误："+e.message;}
+}
+
+(async()=>{
+  try{await loadIPs();}catch(e){document.getElementById("ips").value="";updateLines();}
+  loadNodes();
+  loadUsage();
+})();
 </script>
 </body>
-</html>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
+</html>\`,{headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store"}});
 }
+
