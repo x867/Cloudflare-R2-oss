@@ -87,20 +87,15 @@ async function getNodes(env) {
   return text.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
 }
 
-function getUUID(env) {
+async function getUUID(env) {
   const uuid = String(env.UUID || env.uuid || "").trim().toLowerCase();
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)) {
-    throw new Error("未配置有效 UUID，请设置 Worker 环境变量 UUID");
-  }
-  return uuid;
-}
-
-async function md5md5(text) {
-  const encoder = new TextEncoder();
-  const first = await crypto.subtle.digest("MD5", encoder.encode(text));
-  const firstHex = Array.from(new Uint8Array(first)).map(x => x.toString(16).padStart(2, "0")).join("");
-  const second = await crypto.subtle.digest("MD5", encoder.encode(firstHex.slice(7, 27)));
-  return Array.from(new Uint8Array(second)).map(x => x.toString(16).padStart(2, "0")).join("").toLowerCase();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)) return uuid;
+  if (!env.KV) throw new Error("KV绑定不存在，请确认绑定名称为 KV");
+  let saved = await env.KV.get("SUB_UUID");
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(String(saved).toLowerCase())) return String(saved).toLowerCase();
+  saved = crypto.randomUUID();
+  await env.KV.put("SUB_UUID", saved);
+  return saved;
 }
 
 function makeVLESS(uuid, node, host) {
@@ -117,12 +112,7 @@ function makeVLESS(uuid, node, host) {
 }
 
 async function subscription(request, env, url) {
-  const uuid = getUUID(env);
-  const token = await md5md5(url.hostname + uuid);
-  const supplied = url.searchParams.get("token");
-  if (supplied && supplied !== token) {
-    return new Response("订阅TOKEN无效", { status: 403, headers: { "Cache-Control": "no-store" } });
-  }
+  const uuid = await getUUID(env);
   const list = await getNodes(env);
   const links = list.map(node => makeVLESS(uuid, node, url.hostname)).filter(Boolean);
   let content = links.join("\n") + (links.length ? "\n" : "");
