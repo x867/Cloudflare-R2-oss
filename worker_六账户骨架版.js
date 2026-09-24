@@ -295,17 +295,31 @@ async function saveIPs(){
   const value=document.getElementById("ips").value.trim();
   if(!value){alert("IP列表不能为空");return;}
   try{
-    // 直接提交原始文本，由后端写入 ADD.txt；不经过 JSON/端口转换。
-    const r=await fetch("/api/nodes",{
+    // 优先走原始 ADD.txt 保存接口；失败时再走兼容接口。
+    let r=await fetch("/admin/ADD.txt",{
       method:"POST",
-      headers:{"Content-Type":"text/plain; charset=utf-8"},
+      headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store"},
       body:value
     });
-    const d=await r.json().catch(()=>({}));
+    let d=await r.json().catch(()=>({}));
+    if(!r.ok||!d.success){
+      r=await fetch("/api/nodes",{
+        method:"POST",
+        headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store"},
+        body:value
+      });
+      d=await r.json().catch(()=>({}));
+    }
     if(!r.ok||!d.success) throw new Error(d.error||"保存失败");
-    lastSaved=value;
+
+    // 保存后立即回读 ADD.txt，确认实际写入内容一致。
+    const verify=await fetch("/admin/ADD.txt",{cache:"no-store"});
+    const saved=await verify.text();
+    if(!verify.ok||saved.trim()!==value) throw new Error("保存后校验失败：ADD.txt内容不一致");
+
+    lastSaved=saved;
     editorDirty=false;
-    document.getElementById("ips").value=value;
+    document.getElementById("ips").value=saved;
     updateLines();
     await loadNodes();
     alert("保存成功");
