@@ -21,9 +21,13 @@ export default {
           const lines=String(b.ips??b.ip??"").trim();
           const port=String(b.port??"").trim();
           if(!lines) throw new Error("IP列表不能为空");
-          if(!port) throw new Error("端口不能为空");
           const ips=lines.split(/\r?\n|[,，]+/).map(x=>x.trim()).filter(Boolean);
-          const value=ips.map(ip=>ip.includes(":")?ip:ip+":"+port).join("\n");
+          if(!ips.length) throw new Error("IP列表不能为空");
+          const value=ips.map(ip=>{
+            if(ip.includes(":")) return ip;
+            if(port) return ip+":"+port;
+            return ip;
+          }).join("\n");
           const fake=new Request(request.url,{method:"POST",body:value});
           return json(await addNode(fake,env));
         }
@@ -284,14 +288,16 @@ async function saveIPs(){
   const value=document.getElementById("ips").value.trim();
   if(!value){alert("IP列表不能为空");return;}
   try{
-    const r=await fetch("/admin/ADD.txt",{
+    const r=await fetch("/api/nodes",{
       method:"POST",
-      headers:{"Content-Type":"text/plain;charset=utf-8"},
-      body:value
+      headers:{"Content-Type":"application/json;charset=utf-8"},
+      body:JSON.stringify({ips:value})
     });
     const d=await r.json();
     if(!r.ok||!d.success) throw new Error(d.error||"保存失败");
     lastSaved=value;
+    document.getElementById("ips").value=value;
+    updateLines();
     await loadNodes();
     alert("保存成功");
   }catch(e){alert("保存失败："+e.message);}
