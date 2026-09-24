@@ -187,7 +187,7 @@ async function subscription(request, env, url) {
     config.HOST ||
     env.HOST ||
     url.hostname
-  ).trim().replace(/^https?:\\/\\//i, "").split("/")[0].split(":")[0];
+  ).trim().replace(/^https?:\/\//i, "").split("/")[0].split(":")[0];
 
   const protocol = String(config.协议类型 || "vless").toLowerCase();
   const transport = String(config.传输协议 || "ws").toLowerCase();
