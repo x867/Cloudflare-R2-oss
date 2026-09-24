@@ -1,3 +1,5 @@
+import { connect } from "cloudflare:sockets";
+
 // Cloudflare Worker：六账户额度 + IP:端口保存 + 订阅
 // KV 绑定：KV
 // Secret：CF_ACCOUNTS_JSON=[{"id":"ACCOUNT_ID","token":"TOKEN"},...共6个]
@@ -6,11 +8,17 @@
 const KEY = "ADD.txt";
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
     try {
+      const upgrade = (request.headers.get("Upgrade") || "").toLowerCase();
+      if (upgrade === "websocket") {
+        const userID = await getSubscriptionUserID(env);
+        return handleWebSocket(request, ctx, userID);
+      }
+
       if (request.method === "GET" && (path === "/" || path === "/admin")) {
         return page();
       }
@@ -279,6 +287,207 @@ async function subscription(request, env, url) {
   }
 
   return new Response(content, { headers });
+}
+
+function handleWebSocket(request, ctx, uuid) {
+  const pair = new WebSocketPair();
+  const client = pair[0];
+  const server = pair[1];
+
+  server.accept({ allowHalfOpen: true });
+  server.binaryType = "arraybuffer";
+
+  let remoteSocket = null;
+  let remoteWriter = null;
+  let closed = false;
+
+  const closeAll = () => {
+    if (closed) return;
+    closed = true;
+    try { remoteWriter?.releaseLock(); } catch {}
+    remoteWriter = null;
+    try { remoteSocket?.close(); } catch {}
+    remoteSocket = null;
+    try { server.close(); } catch {}
+  };
+
+  const earlyData = decodeEarlyData(request.headers.get("sec-websocket-protocol") || "");
+  const inputQueue = [];
+  let inputWaiter = null;
+  let inputClosed = false;
+
+  const pushInput = data => {
+    if (inputClosed) return;
+    if (inputWaiter) {
+      const resolve = inputWaiter;
+      inputWaiter = null;
+      resolve({ done: false, value: data });
+    } else inputQueue.push(data);
+  };
+
+  const closeInput = () => {
+    inputClosed = true;
+    if (inputWaiter) {
+      const resolve = inputWaiter;
+      inputWaiter = null;
+      resolve({ done: true });
+    }
+  };
+
+  const nextInput = () => {
+    if (inputQueue.length) return Promise.resolve({ done: false, value: inputQueue.shift() });
+    if (inputClosed) return Promise.resolve({ done: true });
+    return new Promise(resolve => { inputWaiter = resolve; });
+  };
+
+  if (earlyData) pushInput(earlyData);
+
+  server.addEventListener("message", event => {
+    try { pushInput(toUint8Array(event.data)); }
+    catch { closeInput(); closeAll(); }
+  });
+  server.addEventListener("close", () => { closeInput(); closeAll(); });
+  server.addEventListener("error", () => { closeInput(); closeAll(); });
+
+  const pipePromise = (async () => {
+    try {
+      const first = await nextInput();
+      if (first.done) return;
+
+      const requestInfo = parseVLESS(first.value, uuid);
+      if (requestInfo.error || requestInfo.command !== 1) {
+        throw new Error(requestInfo.error || "Only VLESS TCP is supported");
+      }
+
+      remoteSocket = connect(
+        { hostname: requestInfo.hostname, port: requestInfo.port },
+        { allowHalfOpen: true }
+      );
+      await remoteSocket.opened;
+      remoteWriter = remoteSocket.writable.getWriter();
+
+      if (server.readyState === WebSocket.OPEN) {
+        await sendWS(server, new Uint8Array([requestInfo.version, 0]));
+      }
+
+      if (requestInfo.rawData.byteLength) {
+        await remoteWriter.write(requestInfo.rawData);
+      }
+
+      const remoteReader = remoteSocket.readable.getReader();
+      const remoteToWebSocket = (async () => {
+        try {
+          while (!closed) {
+            const { done, value } = await remoteReader.read();
+            if (done) break;
+            if (value?.byteLength && server.readyState === WebSocket.OPEN) {
+              await sendWS(server, value);
+            }
+          }
+        } finally {
+          try { remoteReader.releaseLock(); } catch {}
+        }
+      })();
+
+      while (true) {
+        const item = await nextInput();
+        if (item.done || !remoteWriter) break;
+        if (item.value?.byteLength) await remoteWriter.write(item.value);
+      }
+
+      try { await remoteToWebSocket; } catch {}
+    } catch {
+      closeAll();
+    } finally {
+      try { remoteWriter?.releaseLock(); } catch {}
+      remoteWriter = null;
+      try { remoteSocket?.close(); } catch {}
+      remoteSocket = null;
+      closeInput();
+      closeAll();
+    }
+  })();
+
+  ctx.waitUntil(pipePromise);
+  return new Response(null, { status: 101, webSocket: client });
+}
+
+async function sendWS(webSocket, data) {
+  const result = webSocket.send(data);
+  if (result && typeof result.then === "function") await result;
+}
+
+function parseVLESS(buffer, expectedUUID) {
+  const data = toUint8Array(buffer);
+  if (data.byteLength < 24) return { error: "Invalid VLESS request" };
+
+  const version = data[0];
+  const requestUUID = formatUUID(data.subarray(1, 17));
+  if (requestUUID !== expectedUUID) return { error: "Invalid UUID" };
+
+  const optionLength = data[17];
+  const commandIndex = 18 + optionLength;
+  if (data.byteLength < commandIndex + 1) return { error: "Invalid VLESS options" };
+
+  const command = data[commandIndex];
+  if (command !== 1 && command !== 2 && command !== 3) return { error: "Invalid VLESS command" };
+
+  const portIndex = commandIndex + 1;
+  if (data.byteLength < portIndex + 3) return { error: "Invalid VLESS address" };
+
+  const port = (data[portIndex] << 8) | data[portIndex + 1];
+  const addressType = data[portIndex + 2];
+  let cursor = portIndex + 3;
+  let hostname = "";
+
+  if (addressType === 1) {
+    if (data.byteLength < cursor + 4) return { error: "Invalid IPv4 address" };
+    hostname = Array.from(data.subarray(cursor, cursor + 4)).join(".");
+    cursor += 4;
+  } else if (addressType === 2) {
+    if (data.byteLength < cursor + 1) return { error: "Invalid domain length" };
+    const length = data[cursor++];
+    if (data.byteLength < cursor + length) return { error: "Invalid domain" };
+    hostname = new TextDecoder().decode(data.subarray(cursor, cursor + length));
+    cursor += length;
+  } else if (addressType === 3) {
+    if (data.byteLength < cursor + 16) return { error: "Invalid IPv6 address" };
+    const view = new DataView(data.buffer, data.byteOffset + cursor, 16);
+    const parts = [];
+    for (let i = 0; i < 8; i++) parts.push(view.getUint16(i * 2).toString(16));
+    hostname = parts.join(":");
+    cursor += 16;
+  } else {
+    return { error: "Unsupported address type" };
+  }
+
+  if (!hostname || port < 1 || port > 65535) return { error: "Invalid destination" };
+  return { error: null, version, command, hostname, port, rawData: data.slice(cursor) };
+}
+
+function formatUUID(bytes) {
+  const hex = Array.from(bytes).map(byte => byte.toString(16).padStart(2, "0")).join("");
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20, 32)].join("-");
+}
+
+function toUint8Array(data) {
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  if (data instanceof Blob) throw new TypeError("Blob WebSocket frames are not supported");
+  return new Uint8Array(data || 0);
+}
+
+function decodeEarlyData(value) {
+  if (!value) return null;
+  try {
+    const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  } catch {
+    return null;
+  }
 }
 
 function json(data, status = 200) {
