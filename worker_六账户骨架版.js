@@ -118,8 +118,6 @@ button{padding:9px 18px;margin:10px 8px 0 0;cursor:pointer}
 <p>一行一个 IP:端口，例如 172.64.229.0:443</p>
 <textarea id="ips" placeholder="172.64.229.0:443"></textarea><br>
 <button onclick="save()">保存</button>
-<button onclick="load()">刷新</button>
-<button onclick="sub()">订阅</button>
 <div id="msg"></div>
 </div>
 <script>
