@@ -122,9 +122,33 @@ async function getSubscriptionUserID(env) {
 }
 
 function parseNode(node) {
-  const m = String(node || "").trim().match(/^(\\[[0-9a-fA-F:]+\\]|[\\d.]+|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*)(?::(\\d+))?(?:#(.+))?$/);
-  if (!m) return null;
-  return { address: m[1], port: m[2] || "443", remark: m[3] || m[1] };
+  const raw = String(node || "").trim();
+  if (!raw) return null;
+
+  const hash = raw.indexOf("#");
+  const base = hash >= 0 ? raw.slice(0, hash) : raw;
+  const remark = hash >= 0 ? decodeURIComponent(raw.slice(hash + 1)) : "";
+
+  let address = base;
+  let port = "443";
+
+  if (base.startsWith("[")) {
+    const end = base.indexOf("]");
+    if (end < 0) return null;
+    address = base.slice(0, end + 1);
+    if (base.slice(end + 1, end + 2) === ":") {
+      port = base.slice(end + 2) || "443";
+    }
+  } else {
+    const colon = base.lastIndexOf(":");
+    if (colon > 0 && /^\d+$/.test(base.slice(colon + 1))) {
+      address = base.slice(0, colon);
+      port = base.slice(colon + 1);
+    }
+  }
+
+  if (!address || !/^\d{1,5}$/.test(port)) return null;
+  return { address, port, remark: remark || address };
 }
 
 async function subscription(request, env, url) {
@@ -161,7 +185,7 @@ async function subscription(request, env, url) {
 
     return link
       .replace(/00000000-0000-4000-8000-000000000000/g, userID)
-      .replace(/example\\.com/g, url.hostname);
+      .replaceAll("example.com", url.hostname);
   }).filter(Boolean);
 
   let content = links.join("\n");
