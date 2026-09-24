@@ -175,6 +175,7 @@ button{padding:9px 18px;margin:10px 8px 0 0;cursor:pointer}
 <p>一行一个 IP:端口，例如 172.64.229.0:443</p>
 <textarea id="ips" placeholder="172.64.229.0:443"></textarea><br>
 <button onclick="save()">保存</button>
+<a href="/sub" target="_blank"><button type="button">订阅接口</button></a>
 <div id="msg" style="display:none"></div>
 </div>
 <script>
