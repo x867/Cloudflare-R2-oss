@@ -87,46 +87,99 @@ async function getNodes(env) {
   return text.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
 }
 
-async function getUUID(env) {
-  const uuid = String(env.UUID || env.uuid || "").trim().toLowerCase();
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)) return uuid;
-  if (!env.KV) throw new Error("KV绑定不存在，请确认绑定名称为 KV");
-  let saved = await env.KV.get("SUB_UUID");
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(String(saved).toLowerCase())) return String(saved).toLowerCase();
-  saved = crypto.randomUUID();
-  await env.KV.put("SUB_UUID", saved);
-  return saved;
+async function MD5MD5(text) {
+  const data = new TextEncoder().encode(String(text));
+  const first = await crypto.subtle.digest("MD5", data);
+  const firstHex = Array.from(new Uint8Array(first)).map(x => x.toString(16).padStart(2, "0")).join("");
+  const second = await crypto.subtle.digest("MD5", new TextEncoder().encode(firstHex.slice(7, 27)));
+  return Array.from(new Uint8Array(second)).map(x => x.toString(16).padStart(2, "0")).join("").toLowerCase();
 }
 
-function makeVLESS(uuid, node, host) {
-  let address = node;
-  let port = "443";
-  let remark = node;
-  const m = node.match(/^(\[[0-9a-fA-F:]+\]|[\\d.]+|[a-zA-Z0-9.-]+)(?::(\\d+))?(?:#(.+))?$/);
+function validUUID(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+async function getSubscriptionUserID(env) {
+  const adminPassword = env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd || env.TOKEN || env.KEY || env.UUID || env.uuid || "";
+  const secretKey = env.KEY || "勿动此默认密钥，有需求请自行通过添加变量KEY进行修改";
+  const envUUID = env.UUID || env.uuid;
+  if (validUUID(envUUID)) return String(envUUID).toLowerCase();
+
+  const userIDMD5 = await MD5MD5(adminPassword + secretKey);
+  return [
+    userIDMD5.slice(0, 8),
+    userIDMD5.slice(8, 12),
+    "4" + userIDMD5.slice(13, 16),
+    "8" + userIDMD5.slice(17, 20),
+    userIDMD5.slice(20)
+  ].join("-");
+}
+
+function parseNode(node) {
+  const m = String(node || "").trim().match(/^(\\[[0-9a-fA-F:]+\\]|[\\d.]+|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*)(?::(\\d+))?(?:#(.+))?$/);
   if (!m) return null;
-  address = m[1];
-  port = m[2] || "443";
-  remark = m[3] || address;
-  const path = "/";
-  return `vless://${uuid}@${address}:${port}?encryption=none&security=tls&type=ws&host=${encodeURIComponent(host)}&sni=${encodeURIComponent(host)}&path=${encodeURIComponent(path)}#${encodeURIComponent(remark)}`;
+  return { address: m[1], port: m[2] || "443", remark: m[3] || m[1] };
 }
 
 async function subscription(request, env, url) {
-  const uuid = await getUUID(env);
+  const userID = await getSubscriptionUserID(env);
+  const subscriptionToken = await MD5MD5(url.hostname + userID);
+  const suppliedToken = url.searchParams.get("token");
+
+  if (suppliedToken && suppliedToken !== subscriptionToken) {
+    return new Response("订阅TOKEN无效", {
+      status: 403,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
+    });
+  }
+  if (!suppliedToken) {
+    return new Response("缺少订阅TOKEN", {
+      status: 403,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
+    });
+  }
+
+  const ua = (request.headers.get("User-Agent") || "").toLowerCase();
+  const isBase64 = url.searchParams.has("b64") || url.searchParams.has("base64");
+  const target = url.searchParams.get("target") || "";
   const list = await getNodes(env);
-  const links = list.map(node => makeVLESS(uuid, node, url.hostname)).filter(Boolean);
-  let content = links.join("\n") + (links.length ? "\n" : "");
-  const wantBase64 = url.searchParams.has("b64") || url.searchParams.has("base64") || url.searchParams.get("target") === "base64";
-  if (wantBase64) content = btoa(unescape(encodeURIComponent(content)));
-  return new Response(content, {
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "Cache-Control": "no-store, no-cache, must-revalidate",
-      "Profile-Update-Interval": "6",
-      "Subscription-Userinfo": "upload=0; download=0; total=0; expire=4102329600"
-    }
-  });
+
+  const links = list.map(node => {
+    const item = parseNode(node);
+    if (!item) return null;
+
+    // 按原版本地 mixed 订阅的节点结构生成，再将占位 UUID/域名替换为当前 Worker 的实际值。
+    const path = "/";
+    const link =
+      `vless://00000000-0000-4000-8000-000000000000@${item.address}:${item.port}?security=tls&type=ws&host=example.com&fp=chrome&sni=example.com&path=${encodeURIComponent(path)}&encryption=none#${encodeURIComponent(item.remark)}`;
+
+    return link
+      .replace(/00000000-0000-4000-8000-000000000000/g, userID)
+      .replace(/example\\.com/g, url.hostname);
+  }).filter(Boolean);
+
+  let content = links.join("\n");
+  if (content) content += "\n";
+
+  if (isBase64 || target === "base64") {
+    content = btoa(unescape(encodeURIComponent(content)));
+  }
+
+  const headers = {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Profile-Update-Interval": "6",
+    "Profile-web-page-url": url.protocol + "//" + url.host + "/admin",
+    "Subscription-Userinfo": "upload=0; download=0; total=0; expire=4102329600",
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate"
+  };
+
+  if (!ua.includes("mozilla")) {
+    headers["Content-Disposition"] = "attachment; filename*=utf-8''subscription.txt";
+  }
+
+  return new Response(content, { headers });
 }
+
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
