@@ -263,6 +263,7 @@ th,td{border-bottom:1px solid #ebeef5;padding:9px;text-align:left;font-size:14px
 
 <script>
 let lastSaved = "";
+let editorDirty = false;
 
 function updateLines(){
   const ta=document.getElementById("ips");
@@ -271,7 +272,10 @@ function updateLines(){
     Array.from({length:count},(_,i)=>i+1).join("\\n");
   document.getElementById("lines").scrollTop=ta.scrollTop;
 }
-document.getElementById("ips").addEventListener("input",updateLines);
+document.getElementById("ips").addEventListener("input",()=>{
+  editorDirty = true;
+  updateLines();
+});
 document.getElementById("ips").addEventListener("scroll",()=>{
   document.getElementById("lines").scrollTop=document.getElementById("ips").scrollTop;
 });
@@ -279,9 +283,12 @@ document.getElementById("ips").addEventListener("scroll",()=>{
 async function loadIPs(){
   const r=await fetch("/admin/ADD.txt",{cache:"no-store"});
   if(!r.ok) throw new Error("读取IP列表失败");
-  lastSaved=await r.text();
-  document.getElementById("ips").value=lastSaved;
-  updateLines();
+  const saved=await r.text();
+  lastSaved=saved;
+  if(!editorDirty && document.activeElement!==document.getElementById("ips")){
+    document.getElementById("ips").value=saved;
+    updateLines();
+  }
 }
 
 async function saveIPs(){
@@ -296,6 +303,7 @@ async function saveIPs(){
     const d=await r.json();
     if(!r.ok||!d.success) throw new Error(d.error||"保存失败");
     lastSaved=value;
+    editorDirty=false;
     document.getElementById("ips").value=value;
     updateLines();
     await loadNodes();
@@ -305,6 +313,7 @@ async function saveIPs(){
 
 function cancelEdit(){
   document.getElementById("ips").value=lastSaved;
+  editorDirty=false;
   updateLines();
 }
 
@@ -370,7 +379,14 @@ async function loadUsage(){
 }
 
 (async()=>{
-  try{await loadIPs();}catch(e){document.getElementById("ips").value="";updateLines();}
+  try{
+    await loadIPs();
+  }catch(e){
+    if(!editorDirty){
+      document.getElementById("ips").value="";
+      updateLines();
+    }
+  }
   loadNodes();
   loadUsage();
 })();
