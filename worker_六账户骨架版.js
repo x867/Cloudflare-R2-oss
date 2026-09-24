@@ -292,38 +292,26 @@ async function loadIPs(){
 }
 
 async function saveIPs(){
-  const value=document.getElementById("ips").value.trim();
-  if(!value){alert("IP列表不能为空");return;}
+  const customIPs = document.getElementById("ips").value;
+  if(!customIPs.trim()){alert("IP列表不能为空");return;}
   try{
-    // 优先走原始 ADD.txt 保存接口；失败时再走兼容接口。
-    let r=await fetch("/admin/ADD.txt",{
-      method:"POST",
-      headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store"},
-      body:value
+    const response = await fetch("/admin/ADD.txt", {
+      method: "POST",
+      body: customIPs
     });
-    let d=await r.json().catch(()=>({}));
-    if(!r.ok||!d.success){
-      r=await fetch("/api/nodes",{
-        method:"POST",
-        headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store"},
-        body:value
-      });
-      d=await r.json().catch(()=>({}));
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || "保存自定义IP失败");
     }
-    if(!r.ok||!d.success) throw new Error(d.error||"保存失败");
-
-    // 保存后立即回读 ADD.txt，确认实际写入内容一致。
-    const verify=await fetch("/admin/ADD.txt",{cache:"no-store"});
-    const saved=await verify.text();
-    if(!verify.ok||saved.trim()!==value) throw new Error("保存后校验失败：ADD.txt内容不一致");
-
-    lastSaved=saved;
-    editorDirty=false;
-    document.getElementById("ips").value=saved;
+    lastSaved = customIPs;
+    editorDirty = false;
+    document.getElementById("ips").value = customIPs;
     updateLines();
     await loadNodes();
-    alert("保存成功");
-  }catch(e){alert("保存失败："+e.message);}
+    alert("自定义IP已保存");
+  } catch (error) {
+    alert("保存自定义IP失败：" + error.message);
+  }
 }
 
 function cancelEdit(){
