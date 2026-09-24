@@ -63,10 +63,7 @@ export default {
       }
 
       if (path === "/sub" && request.method === "GET") {
-        const list = await getNodes(env);
-        return new Response(list.join("\n") + (list.length ? "\n" : ""), {
-          headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
-        });
+        return subscription(request, env, url);
       }
 
       if (path === "/api/usage" && request.method === "GET") {
@@ -88,6 +85,57 @@ async function getNodes(env) {
   if (!env.KV) throw new Error("KV绑定不存在，请确认绑定名称为 KV");
   const text = await env.KV.get(KEY) || "";
   return text.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+}
+
+function getUUID(env) {
+  const uuid = String(env.UUID || env.uuid || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)) {
+    throw new Error("未配置有效 UUID，请设置 Worker 环境变量 UUID");
+  }
+  return uuid;
+}
+
+async function md5md5(text) {
+  const encoder = new TextEncoder();
+  const first = await crypto.subtle.digest("MD5", encoder.encode(text));
+  const firstHex = Array.from(new Uint8Array(first)).map(x => x.toString(16).padStart(2, "0")).join("");
+  const second = await crypto.subtle.digest("MD5", encoder.encode(firstHex.slice(7, 27)));
+  return Array.from(new Uint8Array(second)).map(x => x.toString(16).padStart(2, "0")).join("").toLowerCase();
+}
+
+function makeVLESS(uuid, node, host) {
+  let address = node;
+  let port = "443";
+  let remark = node;
+  const m = node.match(/^(\[[0-9a-fA-F:]+\]|[\\d.]+|[a-zA-Z0-9.-]+)(?::(\\d+))?(?:#(.+))?$/);
+  if (!m) return null;
+  address = m[1];
+  port = m[2] || "443";
+  remark = m[3] || address;
+  const path = "/";
+  return `vless://${uuid}@${address}:${port}?encryption=none&security=tls&type=ws&host=${encodeURIComponent(host)}&sni=${encodeURIComponent(host)}&path=${encodeURIComponent(path)}#${encodeURIComponent(remark)}`;
+}
+
+async function subscription(request, env, url) {
+  const uuid = getUUID(env);
+  const token = await md5md5(url.hostname + uuid);
+  const supplied = url.searchParams.get("token");
+  if (supplied && supplied !== token) {
+    return new Response("订阅TOKEN无效", { status: 403, headers: { "Cache-Control": "no-store" } });
+  }
+  const list = await getNodes(env);
+  const links = list.map(node => makeVLESS(uuid, node, url.hostname)).filter(Boolean);
+  let content = links.join("\n") + (links.length ? "\n" : "");
+  const wantBase64 = url.searchParams.has("b64") || url.searchParams.has("base64") || url.searchParams.get("target") === "base64";
+  if (wantBase64) content = btoa(unescape(encodeURIComponent(content)));
+  return new Response(content, {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      "Profile-Update-Interval": "6",
+      "Subscription-Userinfo": "upload=0; download=0; total=0; expire=4102329600"
+    }
+  });
 }
 
 function json(data, status = 200) {
@@ -119,6 +167,17 @@ button{padding:9px 18px;margin:10px 8px 0 0;cursor:pointer}
 <textarea id="ips" placeholder="172.64.229.0:443"></textarea><br>
 <button onclick="save()">保存</button>
 <div id="msg" style="display:none"></div>
+<hr>
+<h3>订阅</h3>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+  <select id="subType">
+    <option value="">VLESS 文本</option>
+    <option value="?base64=1">Base64</option>
+  </select>
+  <button onclick="copySub()">复制订阅地址</button>
+  <a id="subLink" href="/sub" target="_blank" style="padding:9px 18px">打开订阅</a>
+</div>
+<div id="subMsg" style="display:none;margin-top:10px"></div>
 </div>
 <script>
 const el=document.getElementById("ips"),msg=document.getElementById("msg");
@@ -150,6 +209,25 @@ async function save(){
     showMsg("保存成功");
   }catch(e){showMsg("保存失败："+e.message)}
 }
+async function copySub(){
+  const q=document.getElementById("subType").value;
+  const u=location.origin+"/sub"+q;
+  try{
+    await navigator.clipboard.writeText(u);
+    const m=document.getElementById("subMsg");
+    m.textContent="订阅地址已复制";
+    m.style.display="block";
+    setTimeout(()=>m.style.display="none",2000);
+  }catch(e){
+    prompt("复制订阅地址：",u);
+  }
+}
+function updateSubLink(){
+  const q=document.getElementById("subType").value;
+  document.getElementById("subLink").href="/sub"+q;
+}
+document.getElementById("subType").addEventListener("change",updateSubLink);
+updateSubLink();
 load();
 </script>
 </body>
