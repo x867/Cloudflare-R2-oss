@@ -38,35 +38,54 @@ function json(x,status=200){
 }
 
 async function nodes(env){
-  let list=[];
+  if(!env.KV) throw new Error("KV绑定不存在，请确认生产环境绑定名称为KV");
+
   const raw=await env.KV.get(NODES_KEY);
-  if(raw){try{list=JSON.parse(raw)}catch{}}
-  if(!Array.isArray(list)) list=[];
+  if(!raw) return {success:true,nodes:[]};
+
+  let list;
+  try{
+    list=JSON.parse(raw);
+  }catch{
+    throw new Error("KV中的nodes.json数据格式错误");
+  }
+
+  if(!Array.isArray(list)) throw new Error("KV中的nodes.json不是数组");
   return {success:true,nodes:list};
 }
 
 async function addNode(request,env){
-  const b=await request.json().catch(()=>({}));
-  const port=String(b.port??"").trim();
-  const raw=String(b.ips??b.ip??"");
+  if(!env.KV) throw new Error("KV绑定不存在，请确认生产环境绑定名称为KV");
+
+  let body;
+  try{
+    body=await request.json();
+  }catch{
+    throw new Error("保存数据不是有效JSON");
+  }
+
+  const port=String(body?.port??"").trim();
+  const raw=String(body?.ips??"");
   const ips=[...new Set(
-    raw.split(/\r?\n|[,，]+/)
+    raw.split(/[\r\n,，]+/)
       .map(x=>x.trim())
       .filter(Boolean)
   )];
 
   if(!ips.length) throw new Error("IP列表不能为空");
   if(!port) throw new Error("端口不能为空");
-  if(!/^\d+$/.test(port) || Number(port)<1 || Number(port)>65535){
-    throw new Error("端口必须是1-65535范围内的数字，可填写任意端口，不锁死固定端口");
+
+  // 不锁死固定端口，只检查为合法数字端口。
+  if(!/^\\d+$/.test(port) || Number(port)<1 || Number(port)>65535){
+    throw new Error("端口必须是1-65535范围内的数字，可填写任意端口");
   }
 
-  const list=(await nodes(env)).nodes;
+  const current=await nodes(env);
+  const list=current.nodes;
   let added=0;
 
   for(const ip of ips){
-    const exists=list.some(x=>x.ip===ip && String(x.port)===port);
-    if(!exists){
+    if(!list.some(x=>String(x.ip)===ip && String(x.port)===port)){
       list.push({ip,port});
       added++;
     }
@@ -77,9 +96,11 @@ async function addNode(request,env){
 }
 
 async function deleteNode(request,env){
+  if(!env.KV) throw new Error("KV绑定不存在，请确认生产环境绑定名称为KV");
+
   const u=new URL(request.url);
   const ip=(u.searchParams.get("ip")||"").trim();
-  const port=String(u.searchParams.get("port")||"").trim();
+  const port=(u.searchParams.get("port")||"").trim();
 
   const list=(await nodes(env)).nodes.filter(
     x=>!(String(x.ip)===ip && String(x.port)===port)
@@ -165,7 +186,7 @@ body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-seri
 h1{font-size:24px}button{padding:8px 14px;cursor:pointer}input,textarea{padding:10px;margin-right:8px;box-sizing:border-box}
 textarea{width:100%;min-height:180px;resize:vertical;margin:8px 0 12px}
 input{width:220px}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #eee;padding:8px;text-align:left}
-.hint{color:#666;font-size:14px;margin:6px 0 12px}
+.hint{color:#666;font-size:14px;margin:6px 0 12px}.node-row{padding:8px 0;border-bottom:1px solid #eee}
 </style>
 </head>
 <body>
@@ -186,7 +207,7 @@ input{width:220px}table{width:100%;border-collapse:collapse}td,th{border-bottom:
 5.6.7.8
 8.8.8.8" required></textarea>
 <input id="port" placeholder="端口，例如 443" inputmode="numeric" required>
-<button>批量保存</button>
+<button type="submit">批量保存</button>
 </form>
 </div>
 
@@ -216,58 +237,105 @@ async function loadUsage(){
 async function loadNodes(){
   const box=document.getElementById("nodes");
   try{
-    const r=await fetch("/api/nodes",{cache:"no-store"});
+    const r=await fetch("/api/nodes",{method:"GET",cache:"no-store"});
     const d=await r.json();
     if(!r.ok || !d.success) throw new Error(d.error||"读取节点失败");
-    if(!Array.isArray(d.nodes)||!d.nodes.length){
+
+    const list=Array.isArray(d.nodes)?d.nodes:[];
+    box._nodes=list;
+
+    if(!list.length){
       box.textContent="暂无节点";
       return;
     }
 
-    box.innerHTML=d.nodes.map((x,i)=>
-      "<div>"+escapeHtml(String(x.ip))+":"+escapeHtml(String(x.port))+
-      ' <button onclick="delNode('+i+')">删除</button></div>'
+    box.innerHTML=list.map((x,i)=>
+      "<div class=\"node-row\">"+
+      "<span>"+escapeHtml(String(x.ip))+":"+escapeHtml(String(x.port))+"</span>"+
+      ' <button type="button" onclick="delNode('+i+')">删除</button>'+
+      "</div>"
     ).join("");
-
-    box._nodes=d.nodes;
   }catch(e){
     box.textContent="错误："+e.message;
   }
 }
 
 function escapeHtml(s){
-  return s.replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
+  return s.replace(/[&<>"']/g,ch=>({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+  }[ch]));
 }
 
 async function delNode(index){
   const box=document.getElementById("nodes");
-  const list=box._nodes||[];
-  const x=list[index];
+  const x=(box._nodes||[])[index];
   if(!x) return;
 
   try{
-    const r=await fetch("/api/nodes?ip="+encodeURIComponent(String(x.ip))+
-      "&port="+encodeURIComponent(String(x.port)),{method:"DELETE"});
+    const r=await fetch(
+      "/api/nodes?ip="+encodeURIComponent(String(x.ip))+
+      "&port="+encodeURIComponent(String(x.port)),
+      {method:"DELETE"}
+    );
     const d=await r.json();
     if(!r.ok || !d.success) throw new Error(d.error||"删除失败");
-    loadNodes();
+    await loadNodes();
   }catch(e){
     alert("删除失败："+e.message);
   }
 }
+
 document.getElementById("f").onsubmit=async e=>{
   e.preventDefault();
-  const r=await fetch("/api/nodes",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({
-      ips:document.getElementById("ips").value,
-      port:document.getElementById("port").value
-    })});
-  const d=await r.json();
-  if(!d.success){alert(d.error||"保存失败");return;}
-  alert("已保存 "+d.added+" 个IP");
-  document.getElementById("f").reset();
-  loadNodes();
+
+  const ips=document.getElementById("ips").value.trim();
+  const port=document.getElementById("port").value.trim();
+
+  if(!ips){
+    alert("请填写IP列表");
+    return;
+  }
+  if(!port){
+    alert("请填写端口");
+    return;
+  }
+
+  const button=e.target.querySelector("button[type=submit]");
+  const oldText=button.textContent;
+  button.disabled=true;
+  button.textContent="保存中...";
+
+  try{
+    const r=await fetch("/api/nodes",{
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "Accept":"application/json"
+      },
+      body:JSON.stringify({ips,port})
+    });
+
+    const text=await r.text();
+    let d;
+    try{ d=JSON.parse(text); }
+    catch{ throw new Error("服务器返回的不是JSON："+text.slice(0,200)); }
+
+    if(!r.ok || !d.success){
+      throw new Error(d.error||("HTTP "+r.status));
+    }
+
+    document.getElementById("ips").value="";
+    document.getElementById("port").value="";
+    await loadNodes();
+    alert("保存成功，共新增 "+d.added+" 个节点");
+  }catch(e){
+    alert("保存失败："+e.message);
+  }finally{
+    button.disabled=false;
+    button.textContent=oldText;
+  }
 };
+
 const sub=new URL("/sub",location.href);
 document.getElementById("sub").href=sub;
 document.getElementById("sub").textContent=sub;
