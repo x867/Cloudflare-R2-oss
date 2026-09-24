@@ -295,8 +295,8 @@ async function saveIPs(){
   const value=document.getElementById("ips").value.trim();
   if(!value){alert("IP列表不能为空");return;}
   try{
-    // 按原始版本：直接把文本保存到 ADD.txt，不经过 JSON/端口转换。
-    const r=await fetch("/admin/ADD.txt",{
+    // 直接提交原始文本，由后端写入 ADD.txt；不经过 JSON/端口转换。
+    const r=await fetch("/api/nodes",{
       method:"POST",
       headers:{"Content-Type":"text/plain; charset=utf-8"},
       body:value
