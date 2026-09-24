@@ -49,21 +49,42 @@ async function addNode(request,env){
   const b=await request.json().catch(()=>({}));
   const port=String(b.port??"").trim();
   const raw=String(b.ips??b.ip??"");
-  const ips=[...new Set(raw.split(/[\\n,，]+/).map(x=>x.trim()).filter(Boolean))];
+  const ips=[...new Set(
+    raw.split(/\r?\n|[,，]+/)
+      .map(x=>x.trim())
+      .filter(Boolean)
+  )];
+
   if(!ips.length) throw new Error("IP列表不能为空");
   if(!port) throw new Error("端口不能为空");
-  if(!/^\\d+$/.test(port)||Number(port)<1||Number(port)>65535) throw new Error("端口必须是1-65535，但不会锁死为固定端口");
-  const list=(await nodes(env)).nodes;
-  for(const ip of ips){
-    if(!list.some(x=>x.ip===ip&&String(x.port)===port)) list.push({ip,port});
+  if(!/^\d+$/.test(port) || Number(port)<1 || Number(port)>65535){
+    throw new Error("端口必须是1-65535范围内的数字，可填写任意端口，不锁死固定端口");
   }
+
+  const list=(await nodes(env)).nodes;
+  let added=0;
+
+  for(const ip of ips){
+    const exists=list.some(x=>x.ip===ip && String(x.port)===port);
+    if(!exists){
+      list.push({ip,port});
+      added++;
+    }
+  }
+
   await env.KV.put(NODES_KEY,JSON.stringify(list));
-  return {success:true,added:ips.length,nodes:list};
+  return {success:true,added,nodes:list};
 }
 
 async function deleteNode(request,env){
-  const u=new URL(request.url),ip=u.searchParams.get("ip")||"",port=Number(u.searchParams.get("port"));
-  const list=(await nodes(env)).nodes.filter(x=>!(x.ip===ip&&x.port===port));
+  const u=new URL(request.url);
+  const ip=(u.searchParams.get("ip")||"").trim();
+  const port=String(u.searchParams.get("port")||"").trim();
+
+  const list=(await nodes(env)).nodes.filter(
+    x=>!(String(x.ip)===ip && String(x.port)===port)
+  );
+
   await env.KV.put(NODES_KEY,JSON.stringify(list));
   return {success:true,nodes:list};
 }
@@ -195,15 +216,44 @@ async function loadUsage(){
 async function loadNodes(){
   const box=document.getElementById("nodes");
   try{
-    const d=await fetch("/api/nodes").then(r=>r.json());
-    if(!d.nodes.length){box.textContent="暂无节点";return}
-    box.innerHTML=d.nodes.map(x=>"<div>"+x.ip+":"+x.port+
-      ' <button onclick="delNode('+JSON.stringify(x.ip)+','+x.port+')">删除</button></div>').join("");
-  }catch(e){box.textContent="错误："+e.message}
+    const r=await fetch("/api/nodes",{cache:"no-store"});
+    const d=await r.json();
+    if(!r.ok || !d.success) throw new Error(d.error||"读取节点失败");
+    if(!Array.isArray(d.nodes)||!d.nodes.length){
+      box.textContent="暂无节点";
+      return;
+    }
+
+    box.innerHTML=d.nodes.map((x,i)=>
+      "<div>"+escapeHtml(String(x.ip))+":"+escapeHtml(String(x.port))+
+      ' <button onclick="delNode('+i+')">删除</button></div>'
+    ).join("");
+
+    box._nodes=d.nodes;
+  }catch(e){
+    box.textContent="错误："+e.message;
+  }
 }
-async function delNode(ip,p){
-  await fetch("/api/nodes?ip="+encodeURIComponent(ip)+"&port="+p,{method:"DELETE"});
-  loadNodes();
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
+}
+
+async function delNode(index){
+  const box=document.getElementById("nodes");
+  const list=box._nodes||[];
+  const x=list[index];
+  if(!x) return;
+
+  try{
+    const r=await fetch("/api/nodes?ip="+encodeURIComponent(String(x.ip))+
+      "&port="+encodeURIComponent(String(x.port)),{method:"DELETE"});
+    const d=await r.json();
+    if(!r.ok || !d.success) throw new Error(d.error||"删除失败");
+    loadNodes();
+  }catch(e){
+    alert("删除失败："+e.message);
+  }
 }
 document.getElementById("f").onsubmit=async e=>{
   e.preventDefault();
