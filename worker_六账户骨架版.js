@@ -161,7 +161,7 @@ async function accountUsage(a,index,start,now,limit){
 }
 
 function page(){
-  return new Response(\`<!doctype html>
+  return new Response(`<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -370,6 +370,6 @@ async function loadUsage(){
 })();
 </script>
 </body>
-</html>\`,{headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store"}});
+</html>`,{headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store"}});
 }
 
