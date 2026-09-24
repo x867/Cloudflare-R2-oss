@@ -3,6 +3,8 @@
 // Secret：CF_ACCOUNTS_JSON=[{"id":"ACCOUNT_ID","token":"TOKEN"},...共6个]
 // 可选：CF_DAILY_LIMIT=100000
 
+import { connect } from "cloudflare:sockets";
+
 const KEY = "ADD.txt";
 
 export default {
@@ -69,6 +71,12 @@ export default {
         });
       }
 
+      // 最小 VLESS + TLS + WS 入站：只处理 TCP
+      if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+        const uuid = await getSubscriptionUserID(env);
+        return await handleVLESSWebSocket(request, uuid);
+      }
+
       if (path === "/api/usage" && request.method === "GET") {
         return json(await usage(env));
       }
@@ -85,14 +93,16 @@ export default {
 };
 
 async function getSubscriptionUserID(env) {
-  const 管理员密码 = env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd || env.TOKEN || env.KEY || env.UUID || env.uuid;
+  const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+  try { if (env.KV) { const raw = await env.KV.get("config.json"); if (raw) { const cfg = JSON.parse(raw); if (cfg?.UUID && uuidRegex.test(String(cfg.UUID))) return String(cfg.UUID).toLowerCase(); } } } catch (_) {}
+  const envUUID = env.UUID || env.uuid;
+  if (envUUID && uuidRegex.test(String(envUUID))) return String(envUUID).toLowerCase();
+  const 管理员密码 = env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd || env.TOKEN || env.KEY || env.UUID || env.uuid || "";
   const 加密秘钥 = env.KEY || '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改';
   const userIDMD5 = await MD5MD5(管理员密码 + 加密秘钥);
-  const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
-  const envUUID = env.UUID || env.uuid;
-  return (envUUID && uuidRegex.test(envUUID))
-    ? envUUID.toLowerCase()
-    : [userIDMD5.slice(0, 8), userIDMD5.slice(8, 12), '4' + userIDMD5.slice(13, 16), '8' + userIDMD5.slice(17, 20), userIDMD5.slice(20)].join('-');
+  const userID = [userIDMD5.slice(0, 8), userIDMD5.slice(8, 12), '4' + userIDMD5.slice(13, 16), '8' + userIDMD5.slice(17, 20), userIDMD5.slice(20)].join('-');
+  try { if (env.KV) await env.KV.put("config.json", JSON.stringify({ UUID: userID, PATH: "/", HOST: "" }, null, 2)); } catch (_) {}
+  return userID;
 }
 
 function getNodeHost(env, url) {
@@ -284,4 +294,46 @@ async function accountUsage(account,index,start,end,limit) {
     used,
     remaining: Math.max(0, limit - used)
   };
+}
+
+
+async function handleVLESSWebSocket(request, uuid) {
+  const pair = new WebSocketPair();
+  const client = pair[0], server = pair[1];
+  server.accept(); server.binaryType = "arraybuffer";
+  let remote = null, first = true;
+  const fail = () => { try { server.close(); } catch (_) {} try { remote?.close?.(); } catch (_) {} };
+  server.addEventListener("message", async event => {
+    try {
+      const data = new Uint8Array(event.data instanceof ArrayBuffer ? event.data : await event.data.arrayBuffer());
+      if (first) {
+        first = false;
+        const parsed = parseVLESSHeader(data, uuid);
+        if (!parsed) return fail();
+        remote = connect({ hostname: parsed.host, port: parsed.port });
+        await remote.opened;
+        if (parsed.payload.length) { const w = remote.writable.getWriter(); await w.write(parsed.payload); w.releaseLock(); }
+        pipeRemoteToWebSocket(remote, server);
+      } else if (remote) { const w = remote.writable.getWriter(); await w.write(data); w.releaseLock(); }
+    } catch (_) { fail(); }
+  });
+  server.addEventListener("close", () => { try { remote?.close?.(); } catch (_) {} });
+  return new Response(null, { status: 101, webSocket: client });
+}
+function parseVLESSHeader(data, expectedUUID) {
+  if (data.length < 24 || data[0] !== 1) return null;
+  const hex = expectedUUID.replace(/-/g, ""); if (!/^[0-9a-f]{32}$/i.test(hex)) return null;
+  for (let i=0;i<16;i++) if (data[1+i] !== parseInt(hex.slice(i*2,i*2+2),16)) return null;
+  const optLen=data[17]; let p=18+optLen; if(p+4>data.length)return null;
+  if(data[p++]!==1)return null;
+  const port=(data[p]<<8)|data[p+1]; p+=2; const atype=data[p++]; let host="";
+  if(atype===1){if(p+4>data.length)return null;host=Array.from(data.slice(p,p+4)).join(".");p+=4;}
+  else if(atype===2){if(p>=data.length)return null;const len=data[p++];if(p+len>data.length)return null;host=new TextDecoder().decode(data.slice(p,p+len));p+=len;}
+  else if(atype===3){if(p+16>data.length)return null;const parts=[];for(let i=0;i<16;i+=2)parts.push(((data[p+i]<<8)|data[p+i+1]).toString(16));host=parts.join(":");p+=16;}
+  else return null;
+  return {host,port,payload:data.slice(p)};
+}
+async function pipeRemoteToWebSocket(remote, server) {
+  try { const reader=remote.readable.getReader(); while(true){const {value,done}=await reader.read();if(done)break;if(value?.byteLength)server.send(value);} }
+  catch (_) {} finally { try{server.close();}catch(_){} try{remote.close();}catch(_){} }
 }
