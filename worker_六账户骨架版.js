@@ -47,14 +47,18 @@ async function nodes(env){
 
 async function addNode(request,env){
   const b=await request.json().catch(()=>({}));
-  const ip=String(b.ip||"").trim();
-  const port=Number(b.port);
-  if(!ip) throw new Error("IP不能为空");
-  if(!Number.isInteger(port)||port<1||port>65535) throw new Error("端口必须是1-65535");
+  const port=String(b.port??"").trim();
+  const raw=String(b.ips??b.ip??"");
+  const ips=[...new Set(raw.split(/[\\n,，]+/).map(x=>x.trim()).filter(Boolean))];
+  if(!ips.length) throw new Error("IP列表不能为空");
+  if(!port) throw new Error("端口不能为空");
+  if(!/^\\d+$/.test(port)||Number(port)<1||Number(port)>65535) throw new Error("端口必须是1-65535，但不会锁死为固定端口");
   const list=(await nodes(env)).nodes;
-  if(!list.some(x=>x.ip===ip&&x.port===port)) list.push({ip,port});
+  for(const ip of ips){
+    if(!list.some(x=>x.ip===ip&&String(x.port)===port)) list.push({ip,port});
+  }
   await env.KV.put(NODES_KEY,JSON.stringify(list));
-  return {success:true,nodes:list};
+  return {success:true,added:ips.length,nodes:list};
 }
 
 async function deleteNode(request,env){
@@ -137,8 +141,10 @@ function page(){
 <style>
 body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:900px;margin:30px auto;padding:0 16px;background:#f6f7f9;color:#222}
 .card{background:#fff;border:1px solid #ddd;border-radius:12px;padding:18px;margin:14px 0}
-h1{font-size:24px}button{padding:8px 14px;cursor:pointer}input{padding:8px;margin-right:8px}
-table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #eee;padding:8px;text-align:left}
+h1{font-size:24px}button{padding:8px 14px;cursor:pointer}input,textarea{padding:10px;margin-right:8px;box-sizing:border-box}
+textarea{width:100%;min-height:180px;resize:vertical;margin:8px 0 12px}
+input{width:220px}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #eee;padding:8px;text-align:left}
+.hint{color:#666;font-size:14px;margin:6px 0 12px}
 </style>
 </head>
 <body>
@@ -151,11 +157,15 @@ table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #eee;pad
 </div>
 
 <div class="card">
-<h2>保存 IP + 端口</h2>
+<h2>IP列表 + 端口</h2>
+<div class="hint">IP 一行一个，也支持逗号分隔；端口由你自己填写，不锁死固定端口。</div>
 <form id="f">
-<input id="ip" placeholder="IP" required>
-<input id="port" placeholder="端口" required>
-<button>保存</button>
+<textarea id="ips" placeholder="例如：
+1.2.3.4
+5.6.7.8
+8.8.8.8" required></textarea>
+<input id="port" placeholder="端口，例如 443" inputmode="numeric" required>
+<button>批量保存</button>
 </form>
 </div>
 
@@ -198,9 +208,13 @@ async function delNode(ip,p){
 document.getElementById("f").onsubmit=async e=>{
   e.preventDefault();
   const r=await fetch("/api/nodes",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({ip:document.getElementById("ip").value,port:document.getElementById("port").value})});
+    body:JSON.stringify({
+      ips:document.getElementById("ips").value,
+      port:document.getElementById("port").value
+    })});
   const d=await r.json();
-  if(!d.success) alert(d.error||"保存失败");
+  if(!d.success){alert(d.error||"保存失败");return;}
+  alert("已保存 "+d.added+" 个IP");
   document.getElementById("f").reset();
   loadNodes();
 };
