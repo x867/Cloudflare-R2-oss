@@ -6466,71 +6466,126 @@ async function 注入多账户Usage面板(response) {
 }
 
 async function 调度到可用Executor(request, env) {
-	// V2RayN始终连接账户1；账户1选择后直接转发WebSocket升级，不在账户1内部做双WS桥接。
-	let selectedUrl = '';
+	// V2RayN始终连接账户1；这里只负责把WebSocket Upgrade透明转发到实际Executor。
+	// 调度顺序固定：6 → 5 → 4 → 3 → 2 → 1。
+	// 账户1保留20,000请求作为保护额度；达到80,000后不再承接普通新连接。
+	let selectedId = 0, selectedUrl = '';
 	try {
 		const cfText = env.KV && typeof env.KV.get === 'function' ? await env.KV.get('cf.json') : null;
-		if (cfText) {
-			const cfConfig = JSON.parse(cfText);
-			const accounts = Array.isArray(cfConfig.Accounts) ? cfConfig.Accounts.slice(0, 6) : [];
-			const usage = await getMultiCloudflareUsage(accounts);
-			for (let id = 6; id >= 1; id--) {
-				const item = usage?.accounts?.find(a => Number(a.id) === id);
-				if (!item?.success) continue;
-				const used = Number(item.total) || 0;
-				const max = Number(item.max) || 100000;
-				if (used >= max) continue;
-				if (id === 6) selectedUrl = String(env.EXECUTOR_6_URL || 'https://x.6-aff.workers.dev').trim();
-				if (selectedUrl) break;
-			}
+		const cfConfig = cfText ? JSON.parse(cfText) : {};
+		const accounts = Array.isArray(cfConfig.Accounts) ? cfConfig.Accounts.slice(0, 6) : [];
+		const usage = await getMultiCloudflareUsage(accounts);
+
+		const executorUrls = {
+			6: String(env.EXECUTOR_6_URL || 'https://x.6-aff.workers.dev').trim(),
+			5: String(env.EXECUTOR_5_URL || '').trim(),
+			4: String(env.EXECUTOR_4_URL || '').trim(),
+			3: String(env.EXECUTOR_3_URL || '').trim(),
+			2: String(env.EXECUTOR_2_URL || '').trim(),
+			1: String(env.EXECUTOR_1_URL || '').trim()
+		};
+
+		for (let id = 6; id >= 1; id--) {
+			const item = usage?.accounts?.find(a => Number(a.id) === id);
+			if (!item?.success) continue;
+
+			const used = Number(item.total) || 0;
+			const configuredMax = Number(item.max);
+			const max = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 100000;
+
+			// 账户1：80%后停止普通调度，但原入口仍保留可用。
+			const dispatchLimit = id === 1 ? Math.max(0, max - 20000) : max;
+			if (used >= dispatchLimit) continue;
+
+			const accountConfig = accounts[id - 1];
+			const accountUrl = accountConfig?.ExecutorURL || accountConfig?.executorURL || '';
+			const url = String(accountUrl || executorUrls[id] || '').trim();
+			if (!url) continue;
+
+			selectedId = id;
+			selectedUrl = url;
+			break;
 		}
 	} catch (err) {
 		log(`[多账户调度] Usage选择失败，回退账户1原代理：${err?.message || err}`);
 		return null;
 	}
-	if (!selectedUrl) return null;
+
+	if (!selectedId || !selectedUrl) return null;
 
 	try {
 		const incoming = new URL(request.url);
 		const target = new URL(selectedUrl);
 		target.pathname = incoming.pathname;
 		target.search = incoming.search;
-		const headers = new Headers(request.headers);
-		headers.delete('Host');
+
+		// 只构造必要的WebSocket请求头，避免跨Worker转发Host等受保护请求头。
+		const headers = new Headers();
+		for (const name of ['Sec-WebSocket-Protocol', 'User-Agent', 'Origin', 'Cookie', 'Cache-Control']) {
+			const value = request.headers.get(name);
+			if (value) headers.set(name, value);
+		}
 		headers.set('Upgrade', 'websocket');
-		const forwarded = new Request(target.toString(), { method: 'GET', headers, redirect: 'manual' });
+
+		const forwarded = new Request(target.toString(), {
+			method: 'GET',
+			headers,
+			redirect: 'manual'
+		});
 		const response = await fetch(forwarded);
+
 		if (response.webSocket) {
-			log(`[多账户调度] V2RayN入口账户1 → Executor 6：${target.hostname}`);
+			log(`[多账户调度] V2RayN入口账户1 → Executor ${selectedId}：${target.hostname}`);
 			return response;
 		}
-		log(`[多账户调度] Executor 6握手失败 HTTP ${response.status}，回退账户1原代理`);
+
+		log(`[多账户调度] Executor ${selectedId}握手失败 HTTP ${response.status}，回退账户1原代理`);
 		try { response.body?.cancel(); } catch (_) {}
 		return null;
 	} catch (err) {
-		log(`[多账户调度] Executor连接异常，回退账户1原代理：${err?.message || err}`);
+		log(`[多账户调度] Executor ${selectedId}连接异常，回退账户1原代理：${err?.message || err}`);
 		return null;
 	}
 }
 
 async function getMultiCloudflareUsage(accounts) {
-	const valid = Array.isArray(accounts) ? accounts.filter(a => a?.AccountID && a?.APIToken).slice(0, 6) : [];
-	if (!valid.length) return { success: false, pages: 0, workers: 0, total: 0, max: 600000, accounts: [] };
+	const list = Array.isArray(accounts) ? accounts.slice(0, 6) : [];
+	if (!list.length) return { success: false, pages: 0, workers: 0, total: 0, max: 600000, accounts: [] };
+
 	const nowMs = Date.now();
 	if (多账户Usage缓存.data && nowMs - 多账户Usage缓存.time < 60000) return 多账户Usage缓存.data;
-	const results = await Promise.all(valid.map(async (account, index) => {
+
+	// 账户编号严格跟随cf.json中的第1~6项，避免某个账户缺Token时后面的编号发生错位。
+	const results = await Promise.all(list.map(async (account, index) => {
+		const id = index + 1;
+		if (!account?.AccountID || !account?.APIToken) {
+			return {
+				id,
+				name: account?.name || `账户${id}`,
+				AccountID: account?.AccountID || '',
+				pages: 0,
+				workers: 0,
+				total: 0,
+				max: Number.isFinite(Number(account?.max)) ? Number(account.max) : 100000,
+				success: false,
+				error: '缺少 Account ID 或 API Token'
+			};
+		}
+
 		const usage = await getCloudflareUsage(null, null, account.AccountID, account.APIToken);
 		return {
-			id: index + 1,
-			name: account.name || `账户${index + 1}`,
+			id,
+			name: account.name || `账户${id}`,
 			AccountID: account.AccountID,
 			pages: usage.pages || 0,
 			workers: usage.workers || 0,
 			total: usage.total || 0,
 			max: Number.isFinite(Number(account.max)) ? Number(account.max) : 100000,
-			success: !!usage.success
+			success: !!usage.success,
+			error: usage.error || ''
 		};
 	}));
+
 	const pages = results.reduce((t, i) => t + i.pages, 0);
 	const workers = results.reduce((t, i) => t + i.workers, 0);
 	const total = results.reduce((t, i) => t + i.total, 0);
