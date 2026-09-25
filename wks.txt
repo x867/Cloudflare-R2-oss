@@ -68,6 +68,8 @@ export default {
 		} else if (管理员密码 && upgradeHeader === 'websocket') {// WebSocket代理
 			const 反代上下文 = await 反代参数获取(url, userID, 默认反代IP, 默认反代兜底);
 			log(`[WebSocket] 命中请求: ${url.pathname}${url.search}`);
+			const 调度响应 = await 尝试账户6Executor调度(request, env);
+			if (调度响应) return 调度响应;
 			return await 处理WS请求(request, userID, url, 反代上下文);
 		} else if (管理员密码 && !访问路径.startsWith('admin/') && 访问路径 !== 'login' && request.method === 'POST') {// gRPC/叉HTTP代理
 			const 反代上下文 = await 反代参数获取(url, userID, 默认反代IP, 默认反代兜底);
@@ -1377,6 +1379,90 @@ function 解码WS早期数据(header, token) {
 }
 
 ///////////////////////////////////////////////////////////////////////WS传输数据///////////////////////////////////////////////
+async function 尝试账户6Executor调度(request, env) {
+	// 第一阶段只接入账户6：V2RayN仍然连接账户1，账户1在这里把整个WS连接桥接到Executor 6。
+	const executorUrl = String(env.EXECUTOR_6_URL || 'https://x.6-aff.workers.dev').trim();
+	if (!executorUrl) return null;
+
+	try {
+		const cfText = env.KV && typeof env.KV.get === 'function' ? await env.KV.get('cf.json') : null;
+		if (!cfText) return null;
+		const cfConfig = JSON.parse(cfText);
+		const accounts = Array.isArray(cfConfig.Accounts) ? cfConfig.Accounts.slice(0, 6) : [];
+		if (!accounts.length) return null;
+
+		const usage = await getMultiCloudflareUsage(accounts);
+		const account6 = usage?.accounts?.find(item => Number(item.id) === 6);
+		if (!account6 || !account6.success) {
+			log('[多账户调度] 账户6 Usage读取失败，暂不切换到账户6，继续账户1原代理');
+			return null;
+		}
+
+		const used = Number(account6.total) || 0;
+		const max = Number(account6.max) || 100000;
+		if (used >= max) {
+			log(`[多账户调度] 账户6已达到上限 ${used}/${max}，继续账户1原代理`);
+			return null;
+		}
+
+		log(`[多账户调度] 账户6承载WS：${used}/${max}`);
+
+		const incomingUrl = new URL(request.url);
+		const target = new URL(executorUrl);
+		target.pathname = incomingUrl.pathname;
+		target.search = incomingUrl.search;
+
+		const headers = new Headers();
+		headers.set('Upgrade', 'websocket');
+		const protocol = request.headers.get('Sec-WebSocket-Protocol');
+		if (protocol) headers.set('Sec-WebSocket-Protocol', protocol);
+		const ua = request.headers.get('User-Agent');
+		if (ua) headers.set('User-Agent', ua);
+
+		const response = await fetch(target.toString(), { method: 'GET', headers });
+		const remoteSocket = response.webSocket;
+		if (!remoteSocket) {
+			log(`[多账户调度] Executor 6 WS握手失败：HTTP ${response.status}，回退账户1原代理`);
+			return null;
+		}
+
+		const pair = new WebSocketPair();
+		const [clientSocket, serverSocket] = Object.values(pair);
+		try { serverSocket.accept({ allowHalfOpen: true }); } catch (_) { serverSocket.accept(); }
+		try { remoteSocket.accept({ allowHalfOpen: true }); } catch (_) { remoteSocket.accept(); }
+		serverSocket.binaryType = 'arraybuffer';
+		remoteSocket.binaryType = 'arraybuffer';
+
+		let closed = false;
+		const closeBoth = (code = 1000, reason = '') => {
+			if (closed) return;
+			closed = true;
+			try { if (serverSocket.readyState !== WebSocket.CLOSED) serverSocket.close(code, reason); } catch (_) {}
+			try { if (remoteSocket.readyState !== WebSocket.CLOSED) remoteSocket.close(code, reason); } catch (_) {}
+		};
+
+		serverSocket.addEventListener('message', event => {
+			if (closed) return;
+			try { remoteSocket.send(event.data); }
+			catch (err) { log(`[多账户调度] 上行到Executor 6失败：${err?.message || err}`); closeBoth(1011, 'executor upstream failed'); }
+		});
+		remoteSocket.addEventListener('message', event => {
+			if (closed) return;
+			try { serverSocket.send(event.data); }
+			catch (err) { log(`[多账户调度] Executor 6下行失败：${err?.message || err}`); closeBoth(1011, 'executor downstream failed'); }
+		});
+		serverSocket.addEventListener('close', event => closeBoth(event?.code || 1000, 'client closed'));
+		remoteSocket.addEventListener('close', event => closeBoth(event?.code || 1000, 'executor closed'));
+		serverSocket.addEventListener('error', () => closeBoth(1011, 'client error'));
+		remoteSocket.addEventListener('error', () => closeBoth(1011, 'executor error'));
+
+		return new Response(null, { status: 101, webSocket: clientSocket });
+	} catch (err) {
+		log(`[多账户调度] Executor 6连接异常，回退账户1原代理：${err?.message || err}`);
+		return null;
+	}
+}
+
 async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 	const WS套接字对 = new WebSocketPair();
 	const [clientSock, serverSock] = Object.values(WS套接字对);
