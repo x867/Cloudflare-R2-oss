@@ -344,7 +344,7 @@ export default {
 									const Accounts=[]; for(let i=1;i<=6;i++){const AccountID=document.getElementById('cfid-'+i).value.trim(),APIToken=document.getElementById('cftoken-'+i).value.trim(),max=Number(document.getElementById('cfmax-'+i).value)||100000;if(!AccountID||!APIToken)throw new Error('账户'+i+'的 Account ID 和 API Token 都必须填写');Accounts.push({name:'账户'+i,AccountID,APIToken,max});}
 									const r=await fetch('/admin/cf.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({Accounts})});
 									const d=await r.json(); if(!r.ok||!d.success)throw new Error(d.error||'保存失败');
-									msg.textContent='✅ 已保存。正在刷新额度…'; for(let i=1;i<=6;i++)document.getElementById('cftoken-'+i).value=''; setTimeout(()=>{modal.remove();getPanel().style.display='block';load();},800);
+									msg.textContent='✅ 已保存。正在刷新额度…'; for(let i=1;i<=6;i++)document.getElementById('cftoken-'+i).value=''; setTimeout(()=>{const m=document.getElementById('cfmu-config'); if(m)m.remove(); getPanel().style.display='block'; load();},800);
 								}catch(e){msg.textContent='❌ '+e.message;btn.disabled=false;}
 							}
 							async function load(){try{const r=await fetch('/admin/config.json?_='+Date.now(),{cache:'no-store'});if(r.ok)render(await r.json());}catch(e){}}
