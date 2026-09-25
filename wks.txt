@@ -308,13 +308,13 @@ export default {
 							const pct = (used, max) => max > 0 ? Math.min(100, Math.max(0, used / max * 100)) : 0;
 							function render(data) {
 								const usage = data?.CF?.Usage || {};
-								const accounts = Array.isArray(usage.accounts) && usage.accounts.length ? usage.accounts : [1,2,3,4,5,6].map((id) => ({ id: id, name: '账户' + id, total: 0, max: 100000, success: false }));
+								const accounts = Array.isArray(usage.accounts) && usage.accounts.length ? usage.accounts : [1,2,3,4,5,6].map((id) => ({ id: id, name: '账户' + id, total: 0, max: 100000, success: null }));
 								let panel = document.getElementById('cf-multi-usage-panel');
 								if (!panel) { panel = document.createElement('div'); panel.id = 'cf-multi-usage-panel'; document.body.appendChild(panel); }
-								const total = Number(usage.total || accounts.reduce((t, a) => t + Number(a.total || 0), 0)), max = Number(usage.max || accounts.reduce((t, a) => t + Number(a.max || 100000), 0)), remain = Math.max(0, max - total);
+								const hasRealAccounts = Array.isArray(usage.accounts) && usage.accounts.length > 0; const total = hasRealAccounts ? Number(usage.total || 0) : accounts.reduce((t, a) => t + Number(a.total || 0), 0), max = hasRealAccounts ? Number(usage.max || accounts.reduce((t, a) => t + Number(a.max || 100000), 0)) : accounts.reduce((t, a) => t + Number(a.max || 100000), 0), remain = Math.max(0, max - total);
 								const rows = accounts.map((a) => {
 									const used = Number(a.total || 0), am = Number(a.max || 100000), left = Math.max(0, am - used), p = pct(used, am);
-									const status = !a.success ? '读取失败' : left <= 0 ? '已用完' : p >= 80 ? '⚠️ 高用量' : '正常';
+									const status = a.success === null ? '待配置' : !a.success ? '读取失败' : left <= 0 ? '已用完' : p >= 80 ? '⚠️ 高用量' : '正常';
 									return '<div class="cfmu-row"><div><b>' + esc(a.name) + '</b><span class="cfmu-num">' + fmt(used) + ' / ' + fmt(am) + '</span></div><div class="cfmu-left">剩余 ' + fmt(left) + ' · ' + p.toFixed(1) + '% · ' + status + '</div><div class="cfmu-bar"><i style="width:' + p.toFixed(2) + '%"></i></div></div>';
 								}).join('');
 								const a1 = accounts.find((a) => Number(a.id) === 1) || accounts[0];
