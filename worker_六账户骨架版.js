@@ -101,12 +101,16 @@ function parseVLESSRequest(chunk, token) {
 }
 
 async function forwardTCP(host, port, rawData, ws, responseHeader, wrapper) {
+  log("[TCP] connect start", host, port, "firstDataBytes", dataLength(rawData));
+
   const connectDirect = async data => {
     const socket = connect({ hostname: host, port });
     await Promise.race([
       socket.opened,
       new Promise((_, reject) => setTimeout(() => reject(new Error("连接超时")), 1000))
     ]);
+
+    log("[TCP] connect opened", host, port);
 
     if (dataLength(data) > 0) {
       const writer = socket.writable.getWriter();
@@ -183,8 +187,12 @@ async function connectStreams(remoteSocket, ws, responseHeader, retry) {
 }
 
 async function handleWebSocket(request, uuid) {
+  const requestId = crypto.randomUUID();
+  log("[WS]", requestId, "received", request.url);
+
   const [clientSocket, serverSocket] = Object.values(new WebSocketPair());
   serverSocket.accept();
+  log("[WS]", requestId, "accepted");
   serverSocket.binaryType = "arraybuffer";
 
   const wrapper = {
@@ -200,6 +208,7 @@ async function handleWebSocket(request, uuid) {
     start(controller) {
       const push = data => {
         if (closed) return;
+        log("[WS]", requestId, "message", dataLength(data), "bytes");
         try {
           controller.enqueue(data);
         } catch {
@@ -208,12 +217,16 @@ async function handleWebSocket(request, uuid) {
       };
 
       serverSocket.addEventListener("message", event => push(event.data));
-      serverSocket.addEventListener("close", () => {
+      serverSocket.addEventListener("close", event => {
+        log("[WS]", requestId, "closed", event?.code, event?.reason || "");
         closed = true;
         try { controller.close(); } catch {}
         closeSocket(serverSocket);
       });
-      serverSocket.addEventListener("error", () => closeSocket(serverSocket));
+      serverSocket.addEventListener("error", event => {
+        log("[WS]", requestId, "error", event?.message || "websocket error");
+        closeSocket(serverSocket);
+      });
 
       const earlyData = request.headers.get("sec-websocket-protocol");
       if (earlyData) {
@@ -234,16 +247,26 @@ async function handleWebSocket(request, uuid) {
   readable.pipeTo(new WritableStream({
     async write(chunk) {
       if (!parsed) {
+        log("[VLESS]", requestId, "first packet", dataLength(chunk), "bytes");
         const result = parseVLESSRequest(chunk, uuid);
-        if (result.hasError) throw new Error(result.message);
 
+        if (result.hasError) {
+          log("[VLESS]", requestId, "parse failed", result.message);
+          throw new Error(result.message);
+        }
+
+        log("[VLESS]", requestId, "parsed", result.hostname, result.port, "udp", result.isUDP);
         parsed = true;
 
-        if (result.isUDP) throw new Error("UDP is not supported");
+        if (result.isUDP) {
+          log("[VLESS]", requestId, "UDP rejected");
+          throw new Error("UDP is not supported");
+        }
 
         const responseHeader = new Uint8Array([result.version[0], 0]);
         const rawData = chunk.slice(result.rawIndex);
 
+        log("[VLESS]", requestId, "forward start", result.hostname, result.port);
         await forwardTCP(
           result.hostname,
           result.port,
@@ -252,6 +275,7 @@ async function handleWebSocket(request, uuid) {
           responseHeader,
           wrapper
         );
+        log("[VLESS]", requestId, "forward finished");
       } else if (wrapper.socket) {
         const writer = wrapper.socket.writable.getWriter();
         try {
@@ -268,7 +292,7 @@ async function handleWebSocket(request, uuid) {
       closeSocket(serverSocket);
     }
   })).catch(error => {
-    log("[WebSocket]", error?.message || error);
+    log("[WebSocket]", requestId, "pipeline error", error?.message || error);
     closeSocket(serverSocket);
   });
 
@@ -335,7 +359,10 @@ export default {
       userIDMD5.slice(20)
     ].join("-");
 
-    if ((request.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
+    const upgrade = (request.headers.get("Upgrade") || "").toLowerCase();
+
+    if (upgrade === "websocket") {
+      log("[FETCH] websocket upgrade", request.url);
       return handleWebSocket(request, uuid);
     }
 
