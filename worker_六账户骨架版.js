@@ -60,21 +60,60 @@ async function copySub(){try{await navigator.clipboard.writeText(document.getEle
     }
 
     if (url.pathname==='/sub') {
-      if (url.searchParams.get('token') !== await MD5MD5(host+userID)) return new Response('Unauthorized',{status:401});
-      let config; try{config=await 读取config_JSON(env,host,userID,UA)}catch(e){console.error('[SUB] config error:',e?.message||e);config={UUID:userID,PATH:env.PATH||'/',HOST:host}};
-      const raw=env.KV ? (await env.KV.get('ADD.txt')||'') : '';
-      const items=raw ? (await 整理成数组(raw)).filter(Boolean) : [];
-      const nodePath=String(config.PATH||env.PATH||'/').startsWith('/')?String(config.PATH||env.PATH||'/'):'/'+String(config.PATH||env.PATH||'/');
-      const links=[];
-      for(const item0 of items){
-        let item=String(item0).trim(),address=item,remark='';
-        const hash=item.indexOf('#');if(hash>=0){address=item.slice(0,hash);remark=decodeURIComponent(item.slice(hash+1))}
-        let ip=address,port='443';const m=address.match(/^\\[([^\\]]+)\\]:(\\d+)$/)||address.match(/^([^:]+):(\\d+)$/);if(m){ip=m[1];port=m[2]}
-        const q=new URLSearchParams();q.set('encryption','none');q.set('security','tls');q.set('sni',host);q.set('fp','chrome');q.set('alpn','http/1.1');q.set('type','ws');q.set('host',host);q.set('path',nodePath);
-        links.push('vless://'+config.UUID+'@'+ip+':'+port+'?'+q.toString()+'#'+encodeURIComponent(remark||ip+':'+port));
+      const expectedToken = await MD5MD5(host + userID);
+      if (url.searchParams.get('token') !== expectedToken) {
+        return new Response('Unauthorized', {status:401, headers:{'content-type':'text/plain;charset=utf-8','cache-control':'no-store'}});
       }
-      const body=links.join('\n');
-      return new Response(btoa(unescape(encodeURIComponent(body))),{headers:{'content-type':'text/plain;charset=utf-8','cache-control':'no-store','Profile-Update-Interval':'3'}});
+      if (!env.KV) {
+        return new Response('KV 未绑定', {status:500, headers:{'content-type':'text/plain;charset=utf-8','cache-control':'no-store'}});
+      }
+
+      const raw = await env.KV.get('ADD.txt') || '';
+      const items = String(raw).split(/[,，\\s\\n]+/).map(s => s.trim()).filter(Boolean);
+      const uuid = String(env.UUID || env.uuid || userID).trim();
+      const nodePath = String(env.PATH || '/').startsWith('/') ? String(env.PATH || '/') : '/' + String(env.PATH || '/');
+      const links = [];
+
+      for (const item0 of items) {
+        let item = String(item0).trim();
+        let address = item;
+        let remark = '';
+        const hash = item.indexOf('#');
+        if (hash >= 0) {
+          address = item.slice(0, hash);
+          try { remark = decodeURIComponent(item.slice(hash + 1)); } catch (_) { remark = item.slice(hash + 1); }
+        }
+
+        let ip = address;
+        let port = '443';
+        const m = address.match(/^\\[([^\\]]+)\\]:(\\d+)$/) || address.match(/^([^:]+):(\\d+)$/);
+        if (m) {
+          ip = m[1];
+          port = m[2];
+        }
+
+        const q = new URLSearchParams();
+        q.set('encryption', 'none');
+        q.set('security', 'tls');
+        q.set('sni', host);
+        q.set('fp', 'chrome');
+        q.set('alpn', 'http/1.1');
+        q.set('type', 'ws');
+        q.set('host', host);
+        q.set('path', nodePath);
+
+        links.push('vless://' + uuid + '@' + ip + ':' + port + '?' + q.toString() + '#' + encodeURIComponent(remark || ip + ':' + port));
+      }
+
+      const body = links.join('\\n');
+      const encoded = btoa(unescape(encodeURIComponent(body)));
+      return new Response(encoded, {
+        headers: {
+          'content-type': 'text/plain;charset=utf-8',
+          'cache-control': 'no-store',
+          'Profile-Update-Interval': '3'
+        }
+      });
     }
 
     return new Response('Not Found',{status:404});
