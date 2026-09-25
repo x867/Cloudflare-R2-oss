@@ -684,7 +684,7 @@ export default {
     const host =
       (
         env.HOST ||
-        url.hostname
+        "x.x83870.workers.dev"
       )
         .replace(/^https?:\/\//, "")
         .split("/")[0]
