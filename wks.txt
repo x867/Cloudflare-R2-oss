@@ -305,7 +305,8 @@ export default {
 							}
 						} else return new Response(JSON.stringify({ error: '不支持的POST请求路径' }), { status: 404, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 					} else if (访问路径 === 'admin/config.json') {// 处理 admin/config.json 请求，返回JSON
-						return new Response(JSON.stringify(config_JSON, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
+						多账户Usage缓存 = { time: 0, data: null };
+						return new Response(JSON.stringify(config_JSON, null, 2), { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 					} else if (区分大小写访问路径 === 'admin/ADD.txt') {// 处理 admin/ADD.txt 请求，返回本地优选IP
 						let 本地优选IP = await env.KV.get('ADD.txt') || 'null';
 						if (本地优选IP == 'null') 本地优选IP = (await 生成随机IP(request, config_JSON.优选订阅生成.本地IP库.随机数量, config_JSON.优选订阅生成.本地IP库.指定端口))[1];
@@ -328,7 +329,7 @@ export default {
 								const remain = Math.max(0, max - total);
 								const rows = accounts.map((a) => {
 									const used=Number(a.total||0), am=Number(a.max||100000), left=Math.max(0,am-used), p=pct(used,am);
-									const status=a.success===null?'未配置':!a.success?'读取失败':left<=0?'已用完':p>=80?'⚠️ 高用量':'正常';
+									const status=a.success===null?'未配置':!a.success?('读取失败'+(a.error?'：'+esc(a.error):'')):left<=0?'已用完':p>=80?'⚠️ 高用量':'正常';
 									return '<div class="cfmu-row"><div><b>'+esc(a.name)+'</b><span class="cfmu-num">'+fmt(used)+' / '+fmt(am)+'</span></div><div class="cfmu-left">剩余 '+fmt(left)+' · '+p.toFixed(1)+'% · '+status+'</div><div class="cfmu-bar"><i style="width:'+p.toFixed(2)+'%"></i></div></div>';
 								}).join('');
 								const a1=accounts.find((a)=>Number(a.id)===1)||accounts[0];
@@ -6544,7 +6545,7 @@ async function getCloudflareUsage(Email, GlobalAPIKey, AccountID, APIToken) {
 
 	} catch (error) {
 		console.error('获取使用量错误:', error.message);
-		return { success: false, pages: 0, workers: 0, total: 0, max: 100000 };
+		return { success: false, pages: 0, workers: 0, total: 0, max: 100000, error: error?.message || '未知错误' };
 	}
 }
 
