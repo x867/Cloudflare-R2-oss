@@ -308,7 +308,7 @@ export default {
 							const pct = (used, max) => max > 0 ? Math.min(100, Math.max(0, used / max * 100)) : 0;
 							function render(data) {
 								const usage = data?.CF?.Usage || {};
-								const accounts = Array.isArray(usage.accounts) ? usage.accounts : [];
+								const accounts = Array.isArray(usage.accounts) && usage.accounts.length ? usage.accounts : [1,2,3,4,5,6].map((id) => ({ id, name: `账户${id}`, total: 0, max: 100000, success: false }));
 								let panel = document.getElementById('cf-multi-usage-panel');
 								if (!panel) { panel = document.createElement('div'); panel.id = 'cf-multi-usage-panel'; document.body.appendChild(panel); }
 								const total = Number(usage.total || 0), max = Number(usage.max || 0), remain = Math.max(0, max - total);
