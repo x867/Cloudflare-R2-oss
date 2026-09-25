@@ -302,7 +302,7 @@ export default {
 					} else if (访问路径 === 'admin/cf.json') {// CF配置文件
 						return new Response(JSON.stringify(request.cf, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 					} else if (访问路径 === 'admin/multi-usage.js') {// 6账户Usage面板脚本
-						const js = \`(() => {
+						const js = `(() => {
 							const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 							const fmt = (n) => Number(n || 0).toLocaleString('en-US');
 							const pct = (used, max) => max > 0 ? Math.min(100, Math.max(0, used / max * 100)) : 0;
@@ -356,7 +356,7 @@ export default {
 								load();setInterval(load,60000);
 							}
 							if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
-						})();\`;
+						})();`;
 
 						return new Response(js, { status: 200, headers: { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-store' } });
 					}
