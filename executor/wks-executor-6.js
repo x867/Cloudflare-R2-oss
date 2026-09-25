@@ -81,11 +81,22 @@ async function getExecutorUUID(env) {
 }
 
 async function md5Hex(value) {
-  const data = new TextEncoder().encode(value);
-  const digest = await crypto.subtle.digest("MD5", data);
-  return Array.from(new Uint8Array(digest))
+  const encoder = new TextEncoder();
+
+  // 与账户1 wks.txt 的 MD5MD5() 完全一致：
+  // 第一次 MD5 -> 取十六进制字符串第 7~26 位 -> 第二次 MD5。
+  const firstDigest = await crypto.subtle.digest("MD5", encoder.encode(value));
+  const firstHex = Array.from(new Uint8Array(firstDigest))
     .map(b => b.toString(16).padStart(2, "0"))
     .join("");
+
+  const secondInput = firstHex.slice(7, 27);
+  const secondDigest = await crypto.subtle.digest("MD5", encoder.encode(secondInput));
+
+  return Array.from(new Uint8Array(secondDigest))
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("")
+    .toLowerCase();
 }
 
 function uuidBytes(uuid) {
