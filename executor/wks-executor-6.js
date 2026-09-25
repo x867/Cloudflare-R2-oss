@@ -4,8 +4,11 @@ import { connect } from "cloudflare:sockets";
  * EdgeTunnel Executor 6
  * 用途：部署在 Cloudflare 账户6，仅负责 VLESS + WebSocket -> TCP 双向转发。
  *
- * 必须配置 Worker Variables：
- *   UUID = 与账户1 EdgeTunnel 使用的 UUID 相同
+ * UUID 机制与账户1 EdgeTunnel 保持一致：
+ *   1. 如果设置 UUID 环境变量且格式正确，优先使用 UUID。
+ *   2. 如果没有 UUID，则使用 ADMIN/PASSWORD/TOKEN/KEY 等与账户1相同的密码来源，
+ *      按账户1 wks.txt 的 MD5 规则生成 userID。
+ *
  * 可选：
  *   EXECUTOR_SECRET = 额外的 HTTP Header 密钥；设置后客户端必须带
  *   X-Executor-Secret: <value>
@@ -28,9 +31,9 @@ export default {
         return new Response("Forbidden", { status: 403 });
       }
 
-      const uuid = String(env.UUID || "").trim().toLowerCase();
-      if (!isUUID(uuid)) {
-        return new Response("Executor UUID is not configured", { status: 500 });
+      const uuid = await getExecutorUUID(env);
+      if (!uuid) {
+        return new Response("Executor UUID could not be derived. Configure UUID or the same password/KEY variables used by account 1.", { status: 500 });
       }
 
       return handleWebSocket(request, uuid);
@@ -47,8 +50,42 @@ export default {
   }
 };
 
+const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+
 function isUUID(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+  return uuidRegex.test(value);
+}
+
+async function getExecutorUUID(env) {
+  const configured = String(env.UUID || env.uuid || "").trim().toLowerCase();
+  if (isUUID(configured)) return configured;
+
+  // 与账户1 wks.txt 的管理员密码来源保持一致。
+  const adminPassword =
+    env.ADMIN || env.admin || env.PASSWORD || env.password ||
+    env.pswd || env.TOKEN || env.KEY || env.UUID || env.uuid;
+
+  if (!adminPassword) return null;
+
+  const secret = env.KEY || "勿动此默认密钥，有需求请自行通过添加变量KEY进行修改";
+  const userIDMD5 = await md5Hex(String(adminPassword) + String(secret));
+
+  // 与账户1完全相同的 UUID 拼接规则。
+  return [
+    userIDMD5.slice(0, 8),
+    userIDMD5.slice(8, 12),
+    "4" + userIDMD5.slice(13, 16),
+    "8" + userIDMD5.slice(17, 20),
+    userIDMD5.slice(20)
+  ].join("-").toLowerCase();
+}
+
+async function md5Hex(value) {
+  const data = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("MD5", data);
+  return Array.from(new Uint8Array(digest))
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function uuidBytes(uuid) {
@@ -166,7 +203,6 @@ async function processData(data, state, ws, expectedUUID) {
     state.socket = socket;
     state.writer = socket.writable.getWriter();
 
-    // VLESS response: version + addons length(0) + command response(0)
     ws.send(new Uint8Array([parsed.version, 0, 0]));
 
     if (state.buffer.length) {
@@ -245,7 +281,6 @@ async function connectTarget(host, port) {
     throw new Error("Invalid target");
   }
 
-  // Cloudflare Workers runtime provides connect() in Workers with TCP sockets.
   if (typeof connect !== "function") {
     throw new Error("Cloudflare TCP connect API is unavailable");
   }
