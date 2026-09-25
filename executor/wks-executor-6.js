@@ -24,6 +24,7 @@ const textEncoder = new TextEncoder();
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    console.log("[Executor6] request:", request.method, url.pathname, "upgrade=", request.headers.get("Upgrade") || "-", "host=", request.headers.get("Host") || "-");
 
     if (request.method === "GET" && request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
       const secret = String(env.EXECUTOR_SECRET || "");
