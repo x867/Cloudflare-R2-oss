@@ -68,6 +68,8 @@ export default {
 		} else if (管理员密码 && upgradeHeader === 'websocket') {// WebSocket代理
 			const 反代上下文 = await 反代参数获取(url, userID, 默认反代IP, 默认反代兜底);
 			log(`[WebSocket] 命中请求: ${url.pathname}${url.search}`);
+			const 调度响应 = await 调度到可用Executor(request, env);
+			if (调度响应) return 调度响应;
 			return await 处理WS请求(request, userID, url, 反代上下文);
 		} else if (管理员密码 && !访问路径.startsWith('admin/') && 访问路径 !== 'login' && request.method === 'POST') {// gRPC/叉HTTP代理
 			const 反代上下文 = await 反代参数获取(url, userID, 默认反代IP, 默认反代兜底);
@@ -6460,6 +6462,54 @@ async function 注入多账户Usage面板(response) {
 	} catch (e) {
 		console.error('注入多账户Usage面板失败:', e.message);
 		return response;
+	}
+}
+
+async function 调度到可用Executor(request, env) {
+	// V2RayN始终连接账户1；账户1选择后直接转发WebSocket升级，不在账户1内部做双WS桥接。
+	let selectedUrl = '';
+	try {
+		const cfText = env.KV && typeof env.KV.get === 'function' ? await env.KV.get('cf.json') : null;
+		if (cfText) {
+			const cfConfig = JSON.parse(cfText);
+			const accounts = Array.isArray(cfConfig.Accounts) ? cfConfig.Accounts.slice(0, 6) : [];
+			const usage = await getMultiCloudflareUsage(accounts);
+			for (let id = 6; id >= 1; id--) {
+				const item = usage?.accounts?.find(a => Number(a.id) === id);
+				if (!item?.success) continue;
+				const used = Number(item.total) || 0;
+				const max = Number(item.max) || 100000;
+				if (used >= max) continue;
+				if (id === 6) selectedUrl = String(env.EXECUTOR_6_URL || 'https://x.6-aff.workers.dev').trim();
+				if (selectedUrl) break;
+			}
+		}
+	} catch (err) {
+		log(`[多账户调度] Usage选择失败，回退账户1原代理：${err?.message || err}`);
+		return null;
+	}
+	if (!selectedUrl) return null;
+
+	try {
+		const incoming = new URL(request.url);
+		const target = new URL(selectedUrl);
+		target.pathname = incoming.pathname;
+		target.search = incoming.search;
+		const headers = new Headers(request.headers);
+		headers.delete('Host');
+		headers.set('Upgrade', 'websocket');
+		const forwarded = new Request(target.toString(), { method: 'GET', headers, redirect: 'manual' });
+		const response = await fetch(forwarded);
+		if (response.webSocket) {
+			log(`[多账户调度] V2RayN入口账户1 → Executor 6：${target.hostname}`);
+			return response;
+		}
+		log(`[多账户调度] Executor 6握手失败 HTTP ${response.status}，回退账户1原代理`);
+		try { response.body?.cancel(); } catch (_) {}
+		return null;
+	} catch (err) {
+		log(`[多账户调度] Executor连接异常，回退账户1原代理：${err?.message || err}`);
+		return null;
 	}
 }
 
