@@ -718,7 +718,7 @@ export default {
     uuid =
       (
         uuid ||
-        "00000000-0000-4000-8000-000000000000"
+        "3c29c4f4-26c0-45ab-820a-88093337b024"
       ).toLowerCase();
 
     /* =====================
@@ -755,301 +755,91 @@ export default {
     }
 
     /* =====================
-       IP 保存
+       单节点订阅
+       只生成一条可用 VLESS 配置：
+       IP + UUID + SNI(当前 Worker 域名)
     ===================== */
 
-    if (
-      url.pathname ===
-      "/admin/ADD.txt"
-    ) {
+    if (url.pathname === "/sub") {
 
-      if (
-        request.method ===
-        "GET"
-      ) {
+      const targetIP = env.IP || "172.64.229.0";
+      const path = String(env.PATH || "/").startsWith("/")
+        ? String(env.PATH || "/")
+        : "/" + String(env.PATH || "/");
 
-        return new Response(
-          await env.KV.get(
-            "ADD.txt"
-          ) || ""
-        );
-      }
+      const query = new URLSearchParams();
+      query.set("encryption", "none");
+      query.set("security", "tls");
+      query.set("sni", host);
+      query.set("fp", "chrome");
+      query.set("alpn", "http/1.1");
+      query.set("type", "ws");
+      query.set("host", host);
+      query.set("path", path);
 
-      if (
-        request.method ===
-        "POST"
-      ) {
+      const link =
+        `vless://${uuid}@${targetIP}:443?` +
+        query.toString() +
+        `#${encodeURIComponent(targetIP)}`;
 
-        const text =
-          await request.text();
-
-        if (!text.trim()) {
-
-          return Response.json(
-            {
-              success: false,
-              error:
-                "IP列表不能为空"
-            },
-            {
-              status: 400
-            }
-          );
+      return new Response(link, {
+        headers: {
+          "content-type": "text/plain;charset=utf-8"
         }
-
-        await env.KV.put(
-          "ADD.txt",
-          text
-        );
-
-        return Response.json({
-          success: true
-        });
-      }
+      });
     }
 
     /* =====================
-       订阅
+       配置生成页面
     ===================== */
 
-    if (
-      url.pathname ===
-      "/sub"
-    ) {
+    if (url.pathname === "/" || url.pathname === "/admin") {
 
-      const token =
-        await MD5MD5(
-          host + uuid
-        );
+      const targetIP = env.IP || "172.64.229.0";
+      const path = String(env.PATH || "/").startsWith("/")
+        ? String(env.PATH || "/")
+        : "/" + String(env.PATH || "/");
 
-      if (
-        url.searchParams.get(
-          "token"
-        ) !== token
-      ) {
+      const query = new URLSearchParams();
+      query.set("encryption", "none");
+      query.set("security", "tls");
+      query.set("sni", host);
+      query.set("fp", "chrome");
+      query.set("alpn", "http/1.1");
+      query.set("type", "ws");
+      query.set("host", host);
+      query.set("path", path);
 
-        return new Response(
-          "Unauthorized",
-          {
-            status: 401
-          }
-        );
-      }
-
-      const ips =
-        await env.KV.get(
-          "ADD.txt"
-        ) || "";
-
-      const path =
-        String(env.PATH || "/").startsWith("/")
-          ? String(env.PATH || "/")
-          : "/" + String(env.PATH || "/");
-
-      const links =
-        String(ips)
-          .split(/[,，\s]+/)
-          .map(ip => ip.trim())
-          .filter(Boolean)
-          .map(item => {
-
-            let address = item;
-            let remark = "";
-
-            const hash = item.indexOf("#");
-            if (hash >= 0) {
-              address = item.slice(0, hash);
-              try {
-                remark = decodeURIComponent(item.slice(hash + 1));
-              } catch {
-                remark = item.slice(hash + 1);
-              }
-            }
-
-            let ip = address;
-            let port = "443";
-
-            const match =
-              address.match(/^\[([^\]]+)\]:(\d+)$/) ||
-              address.match(/^([^:]+):(\d+)$/);
-
-            if (match) {
-              ip = match[1];
-              port = match[2];
-            }
-
-            const query = new URLSearchParams();
-            query.set("encryption", "none");
-            query.set("security", "tls");
-            query.set("sni", host);
-            query.set("fp", "chrome");
-            query.set("alpn", "http/1.1");
-            query.set("type", "ws");
-            query.set("host", host);
-            query.set("path", path);
-
-            return (
-              `vless://${uuid}@${ip}:${port}?` +
-              query.toString() +
-              `#${encodeURIComponent(remark || ip + ":" + port)}`
-            );
-          });
-
-      const body =
-        links.join("\n");
-
-      return new Response(
-        btoa(
-          unescape(
-            encodeURIComponent(body)
-          )
-        ),
-        {
-          headers: {
-            "content-type":
-              "text/plain;charset=utf-8"
-          }
-        }
-      );
-    }
-
-    /* =====================
-       IP 管理页面
-    ===================== */
-
-    if (
-      url.pathname === "/" ||
-      url.pathname === "/admin"
-    ) {
-
-      const ips =
-        await env.KV.get(
-          "ADD.txt"
-        ) || "";
-
-      const token =
-        await MD5MD5(
-          host + uuid
-        );
+      const link =
+        `vless://${uuid}@${targetIP}:443?` +
+        query.toString() +
+        `#${encodeURIComponent(targetIP)}`;
 
       const html = `<!doctype html>
 <meta charset="utf-8">
 <title>VLESS</title>
-
-<textarea
- id="ips"
- style="width:100%;height:300px"
- placeholder="每行一个IP"
->${ips}</textarea>
-
-<br>
-
-<button onclick="save()">
-保存IP
-</button>
-
-<button onclick="makeSub()">
-生成订阅
-</button>
-
-<input
- id="sub"
- style="width:70%"
- readonly
->
-
+<h3>VLESS 单节点配置</h3>
+<textarea id="config" style="width:100%;height:120px" readonly>${link}</textarea>
+<br><br>
+<button onclick="copyConfig()">复制配置</button>
 <div id="msg"></div>
-
 <script>
-
-const el =
-document.getElementById("ips");
-
-const msg =
-document.getElementById("msg");
-
-let lastSaved = el.value;
-
-async function save(){
-
-  const text = el.value;
-
-  if(!text.trim()){
-    msg.textContent =
-      "IP列表不能为空";
-    return;
-  }
-
-  if(text === lastSaved){
-    return;
-  }
-
-  try{
-
-    const r =
-      await fetch(
-        "/admin/ADD.txt",
-        {
-          method:"POST",
-          body:text
-        }
-      );
-
-    const d =
-      await r.json();
-
-    if(
-      !r.ok ||
-      !d.success
-    ){
-      throw Error(
-        d.error ||
-        "保存失败"
-      );
-    }
-
-    lastSaved = text;
-
-    msg.textContent =
-      "保存成功";
-
-  }catch(e){
-
-    msg.textContent =
-      "保存失败：" +
-      e.message;
-  }
+function copyConfig(){
+  const v=document.getElementById("config").value;
+  navigator.clipboard?.writeText(v).then(()=>{
+    document.getElementById("msg").textContent="已复制";
+  }).catch(()=>{
+    document.getElementById("config").select();
+    document.getElementById("msg").textContent="请手动复制";
+  });
 }
-
-function makeSub(){
-
-  const u =
-    location.origin +
-    "/sub?token=${token}";
-
-  document.getElementById(
-    "sub"
-  ).value = u;
-
-  navigator.clipboard
-    ?.writeText(u)
-    .catch(()=>{});
-
-  msg.textContent =
-    "订阅地址已生成";
-}
-
 </script>`;
 
-      return new Response(
-        html,
-        {
-          headers: {
-            "content-type":
-              "text/html;charset=utf-8"
-          }
+      return new Response(html, {
+        headers: {
+          "content-type": "text/html;charset=utf-8"
         }
-      );
+      });
     }
 
     return new Response(
