@@ -40,13 +40,13 @@ export default {
       const token=await MD5MD5(host+userID);
       const subURL=url.origin+'/sub?token='+token;
       const saved=env.KV ? (await env.KV.get('ADD.txt')||'') : '';
-      const html='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>IP订阅</title><style>body{font-family:Arial,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;background:#f6f7f9;color:#222}textarea{width:100%;height:320px;box-sizing:border-box;padding:12px;font:14px monospace;border:1px solid #ccc;border-radius:8px}button{margin-top:12px;padding:10px 18px;border:0;border-radius:7px;cursor:pointer}input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:7px;margin:6px 0 12px}.box{background:#fff;padding:22px;border-radius:12px;box-shadow:0 2px 12px #0001}</style></head><body><div class="box"><h2>IP 列表</h2><textarea id="ips"></textarea><button onclick="save()">保存 IP</button><p id="msg"></p><h2>订阅地址</h2><input id="sub" readonly value="'+subURL+'"><button onclick="copySub()">复制订阅地址</button></div><script>
+      const html=`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>IP订阅</title><style>body{font-family:Arial,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;background:#f6f7f9;color:#222}textarea{width:100%;height:320px;box-sizing:border-box;padding:12px;font:14px monospace;border:1px solid #ccc;border-radius:8px}button{margin-top:12px;padding:10px 18px;border:0;border-radius:7px;cursor:pointer}input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:7px;margin:6px 0 12px}.box{background:#fff;padding:22px;border-radius:12px;box-shadow:0 2px 12px #0001}</style></head><body><div class="box"><h2>IP 列表</h2><textarea id="ips"></textarea><button onclick="save()">保存 IP</button><p id="msg"></p><h2>订阅地址</h2><input id="sub" readonly value="'+subURL+'"><button onclick="copySub()">复制订阅地址</button></div><script>
 const el=document.getElementById("ips"),msg=document.getElementById("msg");let msgTimer,lastSaved="";
 function showMsg(text,ms=2000){clearTimeout(msgTimer);msg.textContent=text;msg.style.display="block";msgTimer=setTimeout(()=>{msg.style.display="none";msg.textContent=""},ms)}
 async function load(){try{const r=await fetch("/admin/ADD.txt?_="+Date.now());if(!r.ok)throw Error("读取失败");lastSaved=await r.text();el.value=lastSaved}catch(e){}}
 async function save(){const text=el.value;if(!text.trim()){showMsg("IP列表不能为空");return}if(text===lastSaved)return;try{const r=await fetch("/admin/ADD.txt",{method:"POST",body:text});const d=await r.json();if(!r.ok||!d.success)throw Error(d.error||"保存失败");lastSaved=text;showMsg("保存成功")}catch(e){showMsg("保存失败："+e.message)}}
 async function copySub(){try{await navigator.clipboard.writeText(document.getElementById("sub").value);showMsg("订阅地址已复制")}catch(e){showMsg("复制失败，请手动复制")}}load();
-</script></body></html>';
+</script></body></html>`;
       return new Response(html,{headers:{'content-type':'text/html;charset=utf-8','cache-control':'no-store'}});
     }
 
