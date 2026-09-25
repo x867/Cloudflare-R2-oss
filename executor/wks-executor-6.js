@@ -36,7 +36,7 @@ export default {
         return new Response("Executor UUID could not be derived. Configure UUID or the same password/KEY variables used by account 1.", { status: 500 });
       }
 
-      return handleWebSocket(request, uuid);
+      return handleWebSocket(request, uuid, env);
     }
 
     if (url.pathname === "/health" || url.pathname === "/") {
@@ -134,12 +134,12 @@ function decodeBase64Url(value) {
   }
 }
 
-async function handleWebSocket(request, expectedUUID) {
+async function handleWebSocket(request, expectedUUID, env) {
   const pair = new WebSocketPair();
   const client = pair[0];
   const server = pair[1];
 
-  server.accept();
+  server.accept({ allowHalfOpen: true });
   server.binaryType = "arraybuffer";
 
   const state = {
@@ -161,16 +161,7 @@ async function handleWebSocket(request, expectedUUID) {
   };
 
   const early = request.headers.get("Sec-WebSocket-Protocol");
-  if (early) {
-    const first = decodeBase64Url(early.split(",")[0].trim());
-    if (first && first.length) {
-      try {
-        await processData(first, state, server, expectedUUID);
-      } catch {
-        closeAll();
-      }
-    }
-  }
+  const earlyData = early ? decodeBase64Url(early.split(",")[0].trim()) : null;
 
   server.addEventListener("message", async event => {
     if (state.closed) return;
@@ -188,6 +179,17 @@ async function handleWebSocket(request, expectedUUID) {
 
   server.addEventListener("close", closeAll);
   server.addEventListener("error", closeAll);
+
+  // 先完成 101 握手，再处理 VLESS Early Data。
+  // 不要在返回 101 之前等待 connect()，否则部分 V2Ray 客户端会因握手超时直接 -1。
+  if (earlyData?.length) {
+    queueMicrotask(() => {
+      processData(earlyData, state, server, expectedUUID).catch((err) => {
+        console.log("[Executor6] early-data error:", err?.message || String(err));
+        closeAll();
+      });
+    });
+  }
 
   return new Response(null, {
     status: 101,
