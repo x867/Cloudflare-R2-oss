@@ -1,3 +1,5 @@
+import { connect } from "cloudflare:sockets";
+
 /**
  * EdgeTunnel Executor 6
  * 用途：部署在 Cloudflare 账户6，仅负责 VLESS + WebSocket -> TCP 双向转发。
