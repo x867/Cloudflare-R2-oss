@@ -301,10 +301,43 @@ export default {
 						return new Response(本地优选IP, { status: 200, headers: { 'Content-Type': 'text/plain;charset=utf-8', 'asn': request.cf.asn } });
 					} else if (访问路径 === 'admin/cf.json') {// CF配置文件
 						return new Response(JSON.stringify(request.cf, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+					} else if (访问路径 === 'admin/multi-usage.js') {// 6账户Usage面板脚本
+						const js = \`(() => {
+							const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+							const fmt = (n) => Number(n || 0).toLocaleString('en-US');
+							const pct = (used, max) => max > 0 ? Math.min(100, Math.max(0, used / max * 100)) : 0;
+							function render(data) {
+								const usage = data?.CF?.Usage || {};
+								const accounts = Array.isArray(usage.accounts) ? usage.accounts : [];
+								let panel = document.getElementById('cf-multi-usage-panel');
+								if (!panel) { panel = document.createElement('div'); panel.id = 'cf-multi-usage-panel'; document.body.appendChild(panel); }
+								const total = Number(usage.total || 0), max = Number(usage.max || 0), remain = Math.max(0, max - total);
+								const rows = accounts.map((a) => {
+									const used = Number(a.total || 0), am = Number(a.max || 100000), left = Math.max(0, am - used), p = pct(used, am);
+									const status = !a.success ? '读取失败' : left <= 0 ? '已用完' : p >= 80 ? '⚠️ 高用量' : '正常';
+									return '<div class="cfmu-row"><div><b>' + esc(a.name) + '</b><span class="cfmu-num">' + fmt(used) + ' / ' + fmt(am) + '</span></div><div class="cfmu-left">剩余 ' + fmt(left) + ' · ' + p.toFixed(1) + '% · ' + status + '</div><div class="cfmu-bar"><i style="width:' + p.toFixed(2) + '%"></i></div></div>';
+								}).join('');
+								const a1 = accounts.find((a) => Number(a.id) === 1) || accounts[0];
+								let protect = '';
+								if (a1) { const u1 = Number(a1.total || 0), m1 = Number(a1.max || 100000), soft = Math.min(80000, m1), reserve = Math.max(0, m1 - soft); protect = '<div class="cfmu-protect"><b>账户1保护</b><span>普通使用线：' + fmt(soft) + '</span><span>保留额度：' + fmt(reserve) + '</span><span>当前：' + fmt(u1) + '</span><strong>' + (u1 >= soft ? '⚠️ 保护模式' : '正常') + '</strong></div>'; }
+								panel.innerHTML = '<div class="cfmu-head"><b>☁️ Cloudflare 6账户 Usage</b><button id="cfmu-close">×</button></div><div class="cfmu-total">总计：' + fmt(total) + ' / ' + fmt(max) + ' · 剩余 ' + fmt(remain) + '</div><div class="cfmu-order">调度顺序：6 → 5 → 4 → 3 → 2 → 1</div><div class="cfmu-list">' + rows + '</div>' + protect + '<div class="cfmu-time">每60秒自动更新</div>';
+								document.getElementById('cfmu-close').onclick = () => { panel.style.display = 'none'; };
+							}
+							async function load() { try { const r = await fetch('/admin/config.json?_=' + Date.now(), { cache: 'no-store' }); if (r.ok) render(await r.json()); } catch (e) {} }
+							function start() {
+								if (!document.body) return setTimeout(start, 100);
+								const style = document.createElement('style');
+								style.textContent = '#cf-multi-usage-panel{position:fixed;right:16px;top:16px;width:360px;max-width:calc(100vw - 32px);z-index:2147483647;background:rgba(18,18,20,.97);color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:14px;box-shadow:0 12px 35px rgba(0,0,0,.35);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}.cfmu-head{padding:12px 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,.1)}.cfmu-head button{border:0;background:transparent;color:#aaa;font-size:20px;cursor:pointer}.cfmu-total,.cfmu-order{padding:8px 14px;color:#ddd}.cfmu-order{font-size:12px;color:#9fc5ff}.cfmu-row{padding:8px 14px;border-top:1px solid rgba(255,255,255,.07)}.cfmu-num{float:right;color:#fff}.cfmu-left{font-size:11px;color:#aaa}.cfmu-bar{height:5px;background:#333;border-radius:5px;margin-top:5px;overflow:hidden}.cfmu-bar i{display:block;height:100%;background:#4da3ff;border-radius:5px}.cfmu-protect{margin:10px 14px;padding:10px;border-radius:10px;background:rgba(255,170,0,.1);border:1px solid rgba(255,170,0,.25);display:grid;gap:3px}.cfmu-protect strong{color:#ffd166}.cfmu-time{padding:8px 14px;color:#777;font-size:10px;text-align:right}.cfmu-list{max-height:55vh;overflow:auto}@media(max-width:700px){#cf-multi-usage-panel{top:8px;right:8px;width:calc(100vw - 16px)}}';
+								document.head.appendChild(style); load(); setInterval(load, 60000);
+							}
+							if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
+						})();\`;
+						return new Response(js, { status: 200, headers: { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-store' } });
 					}
 
 					ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Admin_Login', config_JSON));
-					return fetch(Pages静态页面 + '/admin' + url.search);
+					const adminResponse = await fetch(Pages静态页面 + '/admin' + url.search);
+					return 注入多账户Usage面板(adminResponse);
 				} else if (访问路径 === 'logout' || uuidRegex.test(访问路径)) {//清除cookie并跳转到登录页面
 					const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
@@ -6365,6 +6398,23 @@ function 获取SOCKS5账号(address, 默认端口 = 80) {
 }
 
 let 多账户Usage缓存 = { time: 0, data: null };
+
+async function 注入多账户Usage面板(response) {
+	try {
+		const contentType = response.headers.get('content-type') || '';
+		if (!contentType.includes('text/html')) return response;
+		const html = await response.text();
+		const scriptTag = '<script src="/admin/multi-usage.js?v=1"></script>';
+		const bodyIndex = html.toLowerCase().lastIndexOf('</body>');
+		const newHtml = bodyIndex >= 0 ? html.slice(0, bodyIndex) + scriptTag + html.slice(bodyIndex) : html + scriptTag;
+		const headers = new Headers(response.headers);
+		headers.delete('content-length');
+		return new Response(newHtml, { status: response.status, statusText: response.statusText, headers });
+	} catch (e) {
+		console.error('注入多账户Usage面板失败:', e.message);
+		return response;
+	}
+}
 
 async function getMultiCloudflareUsage(accounts) {
 	const valid = Array.isArray(accounts) ? accounts.filter(a => a?.AccountID && a?.APIToken).slice(0, 6) : [];
