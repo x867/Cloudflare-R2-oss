@@ -690,36 +690,40 @@ export default {
         .split("/")[0]
         .split(":")[0];
 
-    /* UUID */
-    let uuid =
+    /* UUID：严格使用原版单账号生成机制 */
+    const 管理员密码 =
+      env.ADMIN ||
+      env.admin ||
+      env.PASSWORD ||
+      env.password ||
+      env.pswd ||
+      env.TOKEN ||
+      env.KEY ||
       env.UUID ||
       env.uuid;
 
-    /* 如果没有环境变量，
-       尝试读取原版 config.json */
-    if (!uuid && env.KV) {
+    const 加密秘钥 =
+      env.KEY ||
+      "勿动此默认密钥，有需求请自行通过添加变量KEY进行修改";
 
-      try {
+    const userIDMD5 =
+      await MD5MD5(管理员密码 + 加密秘钥);
 
-        const config =
-          JSON.parse(
-            await env.KV.get(
-              "config.json"
-            ) || "{}"
-          );
+    const uuidRegex =
+      /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 
-        uuid =
-          config.UUID ||
-          config.uuid;
+    const envUUID = env.UUID || env.uuid;
 
-      } catch {}
-    }
-
-    uuid =
-      (
-        uuid ||
-        "3c29c4f4-26c0-45ab-820a-88093337b024"
-      ).toLowerCase();
+    const uuid =
+      (envUUID && uuidRegex.test(envUUID))
+        ? envUUID.toLowerCase()
+        : [
+            userIDMD5.slice(0, 8),
+            userIDMD5.slice(8, 12),
+            "4" + userIDMD5.slice(13, 16),
+            "8" + userIDMD5.slice(17, 20),
+            userIDMD5.slice(20)
+          ].join("-");
 
     /* =====================
        VLESS WS
