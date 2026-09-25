@@ -235,9 +235,18 @@ export default {
 						} else if (访问路径 === 'admin/cf.json') { // 保存cf.json配置
 							try {
 								const newConfig = await request.json();
-								const CF_JSON = { Email: null, GlobalAPIKey: null, AccountID: null, APIToken: null, UsageAPI: null };
+								const CF_JSON = { Email: null, GlobalAPIKey: null, AccountID: null, APIToken: null, UsageAPI: null, Accounts: [] };
 								if (!newConfig.init || newConfig.init !== true) {
-									if (newConfig.Email && newConfig.GlobalAPIKey) {
+									if (Array.isArray(newConfig.Accounts) && newConfig.Accounts.length) {
+										if (newConfig.Accounts.length > 6) return new Response(JSON.stringify({ error: '最多支持6个账户' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+										CF_JSON.Accounts = newConfig.Accounts.map((item, index) => ({
+											name: item.name || `账户${index + 1}`,
+											AccountID: item.AccountID || null,
+											APIToken: item.APIToken || null,
+											max: Number.isFinite(Number(item.max)) ? Number(item.max) : 100000,
+										}));
+										if (CF_JSON.Accounts.some(item => !item.AccountID || !item.APIToken)) return new Response(JSON.stringify({ error: '6账户配置不完整：每个账户都需要 AccountID 和 APIToken' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+									} else if (newConfig.Email && newConfig.GlobalAPIKey) {
 										CF_JSON.Email = newConfig.Email;
 										CF_JSON.GlobalAPIKey = newConfig.GlobalAPIKey;
 									} else if (newConfig.AccountID && newConfig.APIToken) {
@@ -249,7 +258,6 @@ export default {
 										return new Response(JSON.stringify({ error: '配置不完整' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 									}
 								}
-
 								// 保存到 KV
 								await env.KV.put('cf.json', JSON.stringify(CF_JSON, null, 2));
 								ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Save_Config', config_JSON));
@@ -5689,12 +5697,14 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 			AccountID: null,
 			APIToken: null,
 			UsageAPI: null,
+			Accounts: [],
 			Usage: {
 				success: false,
 				pages: 0,
 				workers: 0,
 				total: 0,
 				max: 100000,
+				accounts: [],
 			},
 		}
 	};
@@ -5811,15 +5821,24 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 		console.error(`读取tg.json出错: ${error.message}`);
 	}
 
-	const 初始化CF_JSON = { Email: null, GlobalAPIKey: null, AccountID: null, APIToken: null, UsageAPI: null };
-	config_JSON.CF = { ...初始化CF_JSON, Usage: { success: false, pages: 0, workers: 0, total: 0, max: 100000 } };
+	const 初始化CF_JSON = { Email: null, GlobalAPIKey: null, AccountID: null, APIToken: null, UsageAPI: null, Accounts: [] };
+	config_JSON.CF = { ...初始化CF_JSON, Usage: { success: false, pages: 0, workers: 0, total: 0, max: 100000, accounts: [] } };
 	try {
 		const CF_TXT = await env.KV.get('cf.json');
 		if (!CF_TXT) {
 			await env.KV.put('cf.json', JSON.stringify(初始化CF_JSON, null, 2));
 		} else {
 			const CF_JSON = JSON.parse(CF_TXT);
-			if (CF_JSON.UsageAPI) {
+			if (Array.isArray(CF_JSON.Accounts) && CF_JSON.Accounts.length) {
+				config_JSON.CF.Accounts = CF_JSON.Accounts.map((item, index) => ({
+					id: index + 1,
+					name: item.name || `账户${index + 1}`,
+					AccountID: item.AccountID ? 掩码敏感信息(item.AccountID) : null,
+					APIToken: item.APIToken ? 掩码敏感信息(item.APIToken) : null,
+					max: Number.isFinite(Number(item.max)) ? Number(item.max) : 100000,
+				}));
+				config_JSON.CF.Usage = await getMultiCloudflareUsage(CF_JSON.Accounts);
+			} else if (CF_JSON.UsageAPI) {
 				try {
 					const response = await fetch(CF_JSON.UsageAPI);
 					const Usage = await response.json();
@@ -5840,7 +5859,6 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 	} catch (error) {
 		console.error(`读取cf.json出错: ${error.message}`);
 	}
-
 	config_JSON.加载时间 = (performance.now() - 初始化开始时间).toFixed(2) + 'ms';
 	return config_JSON;
 }
@@ -6344,6 +6362,35 @@ function 获取SOCKS5账号(address, 默认端口 = 80) {
 	if (isNaN(port)) throw new Error('无效的 SOCKS 地址格式：端口号必须是数字');
 	if (hostname.includes(":") && !IPv6方括号正则.test(hostname)) throw new Error('无效的 SOCKS 地址格式：IPv6 地址必须用方括号括起来，如 [2001:db8::1]');
 	return { username, password, hostname, port };
+}
+
+let 多账户Usage缓存 = { time: 0, data: null };
+
+async function getMultiCloudflareUsage(accounts) {
+	const valid = Array.isArray(accounts) ? accounts.filter(a => a?.AccountID && a?.APIToken).slice(0, 6) : [];
+	if (!valid.length) return { success: false, pages: 0, workers: 0, total: 0, max: 600000, accounts: [] };
+	const nowMs = Date.now();
+	if (多账户Usage缓存.data && nowMs - 多账户Usage缓存.time < 60000) return 多账户Usage缓存.data;
+	const results = await Promise.all(valid.map(async (account, index) => {
+		const usage = await getCloudflareUsage(null, null, account.AccountID, account.APIToken);
+		return {
+			id: index + 1,
+			name: account.name || `账户${index + 1}`,
+			AccountID: account.AccountID,
+			pages: usage.pages || 0,
+			workers: usage.workers || 0,
+			total: usage.total || 0,
+			max: Number.isFinite(Number(account.max)) ? Number(account.max) : 100000,
+			success: !!usage.success
+		};
+	}));
+	const pages = results.reduce((t, i) => t + i.pages, 0);
+	const workers = results.reduce((t, i) => t + i.workers, 0);
+	const total = results.reduce((t, i) => t + i.total, 0);
+	const max = results.reduce((t, i) => t + i.max, 0);
+	const data = { success: results.every(i => i.success), pages, workers, total, max, accounts: results };
+	多账户Usage缓存 = { time: nowMs, data };
+	return data;
 }
 
 async function getCloudflareUsage(Email, GlobalAPIKey, AccountID, APIToken) {
