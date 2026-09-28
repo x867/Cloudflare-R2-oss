@@ -602,7 +602,7 @@ async function get6AccountWorkerUsage(env) {
 	const API = 'https://api.cloudflare.com/client/v4/graphql';
 	const query = `query GetWorkerUsage(\$accountTag: String!, \$todayStart: Time!, \$now: Time!) { viewer { accounts(filter: {accountTag: \$accountTag}) { today: workersInvocationsAdaptive(limit: 10000, filter: {datetime_geq: \$todayStart, datetime_leq: \$now}) { sum { requests } } } } }`;
 	const queryOne = async (accountTag, token, index) => {
-		const response = await fetch(API, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables: { accountTag, todayStart: todayStart.toISOString(), now: now.toISOString() } }) });
+		const response = await fetch(API, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'X-Rate-Limit-Type': 'account-based', 'Accept': 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables: { accountTag, todayStart: todayStart.toISOString(), now: now.toISOString() } }) });
 		const responseText = await response.text(); let data = {}; try { data = JSON.parse(responseText); } catch (e) { data = {}; }
 		if (!response.ok) { const detail = data?.errors?.[0]?.message || data?.message || responseText.slice(0, 300); throw new Error(`账户${index + 1} GraphQL HTTP ${response.status}: ${detail}`); }
 		if (data?.errors?.length) throw new Error(`账户${index + 1}: ${data.errors[0]?.message || 'GraphQL查询失败'}`);
