@@ -117,11 +117,16 @@ export default {
 						if (request.method === 'POST') {
 							try {
 								const body = await request.json();
-								if (!Array.isArray(body?.accounts) || body.accounts.length !== 6) throw new Error('必须填写账户1~6');
+								if (!Array.isArray(body?.accounts) || body.accounts.length !== 6) throw new Error('账户配置格式错误');
 								const old = await 读取六账户配置(env);
-								const accounts = body.accounts.map((item, i) => ({ id: String(item?.id || '').trim(), token: String(item?.token || '').trim() || old.accounts[i]?.token || '' }));
-								if (accounts.some(item => !item.id)) throw new Error('账户1~6的 Account ID 不能为空');
-								if (accounts.some(item => !item.token)) throw new Error('账户1~6的 Token 不能为空');
+								const accounts = old.accounts.map((item, i) => ({
+									id: String(body.accounts[i]?.id || '').trim() || String(item?.id || '').trim(),
+									token: String(body.accounts[i]?.token || '').trim() || String(item?.token || '').trim()
+								}));
+								const active = accounts.map((item, i) => ({ item, i })).filter(x => x.item.id || x.item.token);
+								if (!active.length) throw new Error('至少填写一个有效的 Account ID 和 Token');
+								const invalid = active.find(x => !x.item.id || !x.item.token);
+								if (invalid) throw new Error('账户' + (invalid.i + 1) + '的 Account ID 和 Token 必须同时填写');
 								const limitParts = String(body?.limits || '').split(',').map(v => Number(v.trim()));
 								if (limitParts.length !== 6 || limitParts.some(v => !Number.isFinite(v) || v <= 0)) throw new Error('每日额度必须是6个正数，用逗号分隔');
 								await 保存六账户配置(env, { accounts, limits: limitParts.map(v => Math.floor(v)) });
