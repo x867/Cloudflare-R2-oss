@@ -542,8 +542,14 @@ export default {
 ///////////////////////////////////////////////////////////////////////叉HTTP传输数据///////////////////////////////////////////////
 async function get6AccountWorkerUsage(env) {
 	// 六个账户的Account ID和Analytics Token只从Worker变量读取，不返回给客户端。
-	const accounts = Array.from({ length: 6 }, (_, i) => String(env[`CF_ACCOUNT_${i + 1}_ID`] || '').trim());
-	if (accounts.some(v => !v)) throw new Error('请完整配置 CF_ACCOUNT_1_ID ~ CF_ACCOUNT_6_ID');
+	const accounts = [
+		'92ee2de0e4ef190277407fa9e7ae36fd',
+		'8b2816e165f735f14a83ac89def4459e',
+		'146e52dcc22f5d9bd2c2b10f8d542f06',
+		'83fa44af903a75ba0ca4693d0eb6fe4d',
+		'fac245d02a464e9730382c29b42c848b',
+		'affeb451182596007fb970d32c6cb141'
+	];
 	const tokenNames = [
 		'CF_ACCOUNT_1_TOKEN', 'CF_ACCOUNT_2_TOKEN', 'CF_ACCOUNT_3_TOKEN',
 		'CF_ACCOUNT_4_TOKEN', 'CF_ACCOUNT_5_TOKEN', 'CF_ACCOUNT_6_TOKEN'
