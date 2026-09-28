@@ -684,10 +684,17 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 
 	const cfg = await 读取六账户配置(env);
 	const requestedMode = String(mode || '').trim().toLowerCase();
-	const normalizedMode = requestedMode === 'drain' || requestedMode === 'balance' ? requestedMode : (cfg.scheduleMode === 'drain' ? 'drain' : 'balance');
-	const reserve1Percent = Number.isFinite(Number(cfg.reserve1Percent)) ? Math.min(100, Math.max(0, Number(cfg.reserve1Percent))) : 10;
-	const reserveOtherPercent = Number.isFinite(Number(cfg.reserveOtherPercent)) ? Math.min(100, Math.max(0, Number(cfg.reserveOtherPercent))) : 5;
-	const rotationPercent = Number.isFinite(Number(cfg.rotationPercent)) ? Math.min(100, Math.max(1, Number(cfg.rotationPercent))) : 10;
+	const normalizedMode = requestedMode === 'drain' || requestedMode === 'balance'
+		? requestedMode
+		: (cfg.scheduleMode === 'drain' ? 'drain' : 'balance');
+
+	const reserve1Percent = Number.isFinite(Number(cfg.reserve1Percent))
+		? Math.min(100, Math.max(0, Number(cfg.reserve1Percent))) : 10;
+	const reserveOtherPercent = Number.isFinite(Number(cfg.reserveOtherPercent))
+		? Math.min(100, Math.max(0, Number(cfg.reserveOtherPercent))) : 5;
+
+	// 固定调度优先顺序：账户1为主账户，备用账户按 6→5→4→3→2。
+	const cycle = [1, 6, 5, 4, 3, 2];
 
 	const enriched = accounts.map((item, index) => {
 		const limit = Math.max(0, Number(item.todayLimit) || 0);
@@ -697,79 +704,55 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		const reserve = Math.floor(limit * reservePercent / 100);
 		const usableRemaining = Math.max(0, remaining - reserve);
 		const usedRatio = limit > 0 ? used / limit : 1;
-		return { account: index + 1, todayUsed: used, todayRemaining: remaining, todayLimit: limit, remainingRatio: limit > 0 ? remaining / limit : 0, usedRatio, reservePercent, reserve, usableRemaining };
+		return {
+			account: index + 1,
+			todayUsed: used,
+			todayRemaining: remaining,
+			todayLimit: limit,
+			remainingRatio: limit > 0 ? remaining / limit : 0,
+			usedRatio,
+			reservePercent,
+			reserve,
+			usableRemaining
+		};
 	});
+
+	const eligible = enriched.filter(item => item.todayRemaining > item.reserve);
 
 	let order = [];
 	let selectedAccount = null;
-	let rotationIndex = null;
 
 	if (normalizedMode === 'drain') {
-		// 放干模式：账户1只使用到保留比例；随后 6→5→4→3→2 依次放干。
-		if (enriched[0].todayRemaining > enriched[0].reserve) order.push(1);
-		order.push(6, 5, 4, 3, 2);
-		selectedAccount = order[0] || null;
+		// 放干模式：账户1先使用到保留线；之后严格按 6→5→4→3→2 依次放干。
+		if (enriched[0].todayRemaining > enriched[0].reserve) {
+			selectedAccount = 1;
+		} else {
+			selectedAccount = cycle.slice(1).find(account => enriched[account - 1].todayRemaining > enriched[account - 1].reserve) || null;
+		}
+		if (selectedAccount) order = [selectedAccount];
 	} else {
-		// 平衡模式：按“轮换比例”分段使用。默认每个账户使用约10%后轮换下一个账户。
-		// 账户1始终保留自己的保留比例；账户2~6同样遵守各自保留比例。
-		const cycle = [1, 6, 5, 4, 3, 2];
-		const eligible = new Set(enriched.filter(item => item.todayRemaining > item.reserve).map(item => item.account));
-		let state = null;
-		try {
-			const raw = env.KV && typeof env.KV.get === 'function' ? await env.KV.get('cf_6_rotation_state_v1') : null;
-			if (raw) state = JSON.parse(raw);
-		} catch (e) { state = null; }
-
-		let current = Number(state?.account);
-		let startedUsed = Number(state?.startedUsed);
-		if (!Number.isInteger(current) || !cycle.includes(current) || !Number.isFinite(startedUsed)) {
-			current = cycle.find(a => eligible.has(a)) || null;
-			startedUsed = current ? (enriched[current - 1]?.todayUsed || 0) : 0;
-		}
-
-		if (current) {
-			let guard = 0;
-			while (guard++ < cycle.length) {
-				const item = enriched[current - 1];
-				const chunk = Math.max(1, Math.floor((item?.todayLimit || 0) * rotationPercent / 100));
-				const reachedChunk = Number(item?.todayUsed || 0) - startedUsed >= chunk;
-				if (eligible.has(current) && !reachedChunk) break;
-				const pos = cycle.indexOf(current);
-				let next = null;
-				for (let step = 1; step <= cycle.length; step++) {
-					const candidate = cycle[(pos + step) % cycle.length];
-					if (eligible.has(candidate)) { next = candidate; break; }
-				}
-				if (!next) { current = null; break; }
-				current = next;
-				startedUsed = enriched[current - 1]?.todayUsed || 0;
-			}
-		}
-
-		if (current) {
-			selectedAccount = current;
-			rotationIndex = cycle.indexOf(current);
-			const pos = rotationIndex;
-			for (let step = 0; step < cycle.length; step++) {
-				const candidate = cycle[(pos + step) % cycle.length];
-				if (eligible.has(candidate)) order.push(candidate);
-			}
-			try {
-				if (env.KV && typeof env.KV.put === 'function') {
-					await env.KV.put('cf_6_rotation_state_v1', JSON.stringify({ account: current, startedUsed, rotationPercent, updatedAt: usage.updatedAt }));
-				}
-			} catch (e) { }
-		}
+		// 平衡模式：所有仍高于保留线的账户参与轮换。
+		// 每次以“已使用比例最低”的账户优先，达到自己的保留线后自动退出。
+		// 同比例时严格按 1→6→5→4→3→2 作为稳定顺序。
+		const rank = new Map(cycle.map((account, index) => [account, index]));
+		eligible.sort((a, b) => {
+			const ratioDiff = a.usedRatio - b.usedRatio;
+			if (Math.abs(ratioDiff) > 1e-9) return ratioDiff;
+			return (rank.get(a.account) ?? 99) - (rank.get(b.account) ?? 99);
+		});
+		order = eligible.map(item => item.account);
+		selectedAccount = order[0] || null;
 	}
 
 	return {
 		success: true,
 		mode: normalizedMode,
 		selectedAccount,
-		rotationIndex,
 		overQuotaPossible: normalizedMode === 'drain',
-		reserve: { account1Percent: reserve1Percent, accounts2to6Percent: reserveOtherPercent },
-		rotationPercent,
+		reserve: {
+			account1Percent: reserve1Percent,
+			accounts2to6Percent: reserveOtherPercent
+		},
 		updatedAt: usage.updatedAt,
 		todayUsedTotal: usage.todayUsedTotal,
 		todayRemainingTotal: usage.todayRemainingTotal,
