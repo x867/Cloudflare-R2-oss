@@ -324,7 +324,30 @@ export default {
 					}
 
 					ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Admin_Login', config_JSON));
-					return new Response((await (async () => { const r = await fetch(Pages静态页面 + '/admin' + url.search); const h = await r.text(); return h.replace('</body>', '<div style="position:fixed;right:18px;bottom:18px;z-index:99999"><a href="/admin/cfaccountconfig">六账户额度配置</a></div></body>'); })()), { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-store' } });
+					return new Response((await (async () => {
+						const r = await fetch(Pages静态页面 + '/admin' + url.search);
+						const h = await r.text();
+						const 六账户外挂 = `
+<div id="cf6-float-btn" style="position:fixed;right:18px;top:45%;z-index:2147483646;background:#2563eb;color:#fff;padding:12px 16px;border-radius:10px 0 0 10px;box-shadow:0 4px 16px rgba(0,0,0,.25);cursor:pointer;font:600 14px/1.2 Arial,'Microsoft YaHei',sans-serif;">六账户</div>
+<div id="cf6-float-panel" style="display:none;position:fixed;right:18px;top:8%;bottom:8%;width:min(560px,calc(100vw - 36px));z-index:2147483647;background:#fff;border:1px solid #d9dee8;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.28);overflow:hidden;">
+  <div style="height:48px;background:#f6f8fb;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;justify-content:space-between;padding:0 14px;font:700 15px/1 Arial,'Microsoft YaHei',sans-serif;color:#222;">
+    <span>账户1 · 六账户额度配置</span>
+    <button id="cf6-close" type="button" style="border:0;background:#e5e7eb;color:#333;border-radius:7px;padding:7px 11px;cursor:pointer;">关闭</button>
+  </div>
+  <iframe src="/admin/cfaccountconfig" style="width:100%;height:calc(100% - 48px);border:0;background:#f5f6f8;" title="六账户额度配置"></iframe>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById('cf6-float-btn');
+  var panel=document.getElementById('cf6-float-panel');
+  var close=document.getElementById('cf6-close');
+  if(!btn||!panel||!close)return;
+  btn.addEventListener('click',function(){panel.style.display='block';});
+  close.addEventListener('click',function(){panel.style.display='none';});
+})();
+</script>`;
+						return h.replace('</body>', 六账户外挂 + '</body>');
+					})()), { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-store' } });
 				} else if (访问路径 === 'logout' || uuidRegex.test(访问路径)) {//清除cookie并跳转到登录页面
 					const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
