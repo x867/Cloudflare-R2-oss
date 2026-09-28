@@ -587,9 +587,20 @@ async function get6AccountWorkerUsage(env) {
 				}
 			})
 		});
-		if (!response.ok) throw new Error(`账户${index + 1} GraphQL HTTP ${response.status}`);
-		const data = await response.json();
-		if (data?.errors?.length) throw new Error(`账户${index + 1}: ${data.errors[0]?.message || 'GraphQL查询失败'}`);
+		const responseText = await response.text();
+		let data = {};
+		try {
+			data = JSON.parse(responseText);
+		} catch (e) {
+			data = {};
+		}
+		if (!response.ok) {
+			const detail = data?.errors?.[0]?.message || data?.message || responseText.slice(0, 300);
+			throw new Error(`账户${index + 1} GraphQL HTTP ${response.status}: ${detail}`);
+		}
+		if (data?.errors?.length) {
+			throw new Error(`账户${index + 1}: ${data.errors[0]?.message || 'GraphQL查询失败'}`);
+		}
 		const account = data?.data?.viewer?.accounts?.[0];
 		if (!account) throw new Error(`账户${index + 1}未返回账户数据`);
 		return Number(account?.today?.[0]?.sum?.requests || 0);
