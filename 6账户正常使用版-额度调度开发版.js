@@ -763,8 +763,10 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 			if (Math.abs(ratioDiff) > 1e-9) return ratioDiff;
 			return (rank.get(a.account) ?? 99) - (rank.get(b.account) ?? 99);
 		});
-		selectedAccount = eligible[0]?.account || null;
-		if (selectedAccount) order = [selectedAccount];
+		// 平衡模式返回完整轮换队列，而不是只返回一个账户。
+		// 扫描软件会按这个队列逐个切换 UUID/SNI，避免某一个账户连续吃掉大量请求。
+		order = eligible.map(item => item.account);
+		selectedAccount = order[0] || null;
 	}
 
 	return {
