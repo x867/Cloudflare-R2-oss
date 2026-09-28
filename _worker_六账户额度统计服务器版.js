@@ -542,7 +542,7 @@ export default {
 			}
 			return 反代响应;
 		} catch (error) { }
-		return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
+		return new Response('<!doctype html><html><head><meta charset="UTF-8"><title>OK</title></head><body>OK</body></html>', { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
 	}
 };
 ///////////////////////////////////////////////////////////////////////XHTTP传输数据///////////////////////////////////////////////
