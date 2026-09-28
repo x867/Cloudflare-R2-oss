@@ -346,7 +346,10 @@ export default {
   close.addEventListener('click',function(){panel.style.display='none';});
 })();
 </script>`;
-						return h.replace('</body>', 六账户外挂 + '</body>');
+						const 新页面 = /<\/body>/i.test(h)
+			? h.replace(/<\/body>/i, 六账户外挂 + '</body>')
+			: h + 六账户外挂;
+		return 新页面;
 					})()), { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-store' } });
 				} else if (访问路径 === 'logout' || uuidRegex.test(访问路径)) {//清除cookie并跳转到登录页面
 					const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
