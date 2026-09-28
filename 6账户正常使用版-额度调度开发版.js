@@ -597,9 +597,9 @@ export default {
 const 六账户配置KV键 = 'cf_6_account_config_v1';
 
 function 六账户默认额度(env) {
-	const limitsText = String(env.CF_USAGE_LIMITS || '20000,100000,100000,100000,100000,100000');
-	const limits = limitsText.split(',').map((v, i) => { const n = Number(v.trim()); return Number.isFinite(n) && n > 0 ? Math.floor(n) : (i === 0 ? 20000 : 100000); });
-	while (limits.length < 6) limits.push(limits.length === 0 ? 20000 : 100000);
+	const limitsText = String(env.CF_USAGE_LIMITS || '100000,100000,100000,100000,100000,100000');
+	const limits = limitsText.split(',').map((v, i) => { const n = Number(v.trim()); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 100000; });
+	while (limits.length < 6) limits.push(100000);
 	return limits.slice(0, 6);
 }
 
@@ -672,18 +672,47 @@ async function 获取六账户调度(env, mode = 'balance') {
 	});
 
 	let order = [];
+	let selectedAccount = null;
+	let rotationIndex = null;
+
 	if (normalizedMode === 'drain') {
-		// 账户1先用到保留10%，随后 6→5→4→3→2 依次放干。
+		// 放干模式：账户1只使用到保留10%；随后 6→5→4→3→2 依次放干。
+		// 账户2~6不设置本地5%硬挡，允许继续放流量，最终由Cloudflare实际额度/拒绝服务反馈决定。
 		if (enriched[0].todayRemaining > enriched[0].reserve) order.push(1);
-		for (const accountNo of [6, 5, 4, 3, 2]) order.push(accountNo);
+		order.push(6, 5, 4, 3, 2);
+		selectedAccount = order[0] || null;
 	} else {
-		// 平衡模式：账户1保留10%，账户2~6各保留5%，按已使用比例从低到高轮换。
-		order = enriched.filter(item => item.todayRemaining > item.reserve)
-			.sort((a, b) => a.usedRatio - b.usedRatio || a.account - b.account)
-			.map(item => item.account);
+		// 平衡模式：账户1保留10%，账户2~6各保留5%，所有仍有可用额度的账户参与轮换。
+		const eligible = enriched.filter(item => item.todayRemaining > item.reserve).map(item => item.account);
+		if (eligible.length) {
+			let cursor = 0;
+			try {
+				const raw = env.KV && typeof env.KV.get === 'function' ? await env.KV.get('cf_6_rotation_cursor_v1') : null;
+				cursor = Number(raw);
+				if (!Number.isInteger(cursor) || cursor < 0) cursor = 0;
+			} catch (e) { cursor = 0; }
+			rotationIndex = cursor % eligible.length;
+			selectedAccount = eligible[rotationIndex];
+			order = eligible.slice(rotationIndex).concat(eligible.slice(0, rotationIndex));
+			try {
+				if (env.KV && typeof env.KV.put === 'function') await env.KV.put('cf_6_rotation_cursor_v1', String((rotationIndex + 1) % eligible.length));
+			} catch (e) { }
+		}
 	}
 
-	return { success: true, mode: normalizedMode, reserve: { account1Percent: reserve1Percent, accounts2to6Percent: reserveOtherPercent }, updatedAt: usage.updatedAt, todayUsedTotal: usage.todayUsedTotal, todayRemainingTotal: usage.todayRemainingTotal, order, accounts: enriched };
+	return {
+		success: true,
+		mode: normalizedMode,
+		selectedAccount,
+		rotationIndex,
+		overQuotaPossible: normalizedMode === 'drain',
+		reserve: { account1Percent: reserve1Percent, accounts2to6Percent: reserveOtherPercent },
+		updatedAt: usage.updatedAt,
+		todayUsedTotal: usage.todayUsedTotal,
+		todayRemainingTotal: usage.todayRemainingTotal,
+		order,
+		accounts: enriched
+	};
 }
 
 const HPACKHuffman码长 = [
