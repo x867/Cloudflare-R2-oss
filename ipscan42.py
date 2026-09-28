@@ -196,7 +196,7 @@ class NirSoftCFScanner:
         # 六账户 Workers 请求额度
         self.quota_button = ttk.Button(
             top,
-            text="CF额度",
+            text="配置",
             width=7,
             command=self.open_cf_quota_manager
         )
@@ -204,8 +204,8 @@ class NirSoftCFScanner:
 
         self.config_button = ttk.Button(
             top,
-            text="配置",
-            width=7,
+            text="扫描配置",
+            width=8,
             command=self.open_node_config
         )
         self.config_button.pack(side="left", padx=(5, 0))
@@ -2861,17 +2861,23 @@ class NirSoftCFScanner:
         return data
 
     def open_cf_quota_manager(self):
-        """六账户额度面板：只连接账户1后台，自动识别并显示账户1~6。"""
+        """六账户额度配置：直接覆盖主IP列表区域，不创建浮动窗口。"""
         if self.cf_quota_dialog is not None and self.cf_quota_dialog.winfo_exists():
             self.cf_quota_dialog.lift()
             return
 
-        dialog = tk.Toplevel(self.root)
+        # 直接覆盖主 IP 列表区域
+        tree_area = self.tree.master
+        dialog = tk.Frame(
+            tree_area,
+            bd=0,
+            relief="flat",
+            bg="#f4f4f4",
+            highlightthickness=0
+        )
         self.cf_quota_dialog = dialog
-        dialog.title("Cloudflare 六账户请求额度")
-        dialog.geometry("760x420")
-        dialog.minsize(700, 380)
-        dialog.transient(self.root)
+        dialog.place(relx=0, rely=0, relwidth=1, relheight=1)
+        dialog.lift()
 
         frame = ttk.Frame(dialog, padding=12)
         frame.pack(fill="both", expand=True)
@@ -2977,7 +2983,7 @@ class NirSoftCFScanner:
         refresh_button.pack(side="right", padx=(6, 0))
         save_button = ttk.Button(bottom, text="保存配置", width=11)
         save_button.pack(side="right", padx=(6, 0))
-        ttk.Button(bottom, text="关闭", width=9, command=dialog.destroy).pack(side="right")
+        ttk.Button(bottom, text="返回", width=9, command=on_close).pack(side="right")
 
         def save_config():
             config = {
@@ -3047,10 +3053,8 @@ class NirSoftCFScanner:
 
         def on_close():
             self.cf_quota_dialog = None
+            self.cf_quota_refreshing = False
             dialog.destroy()
-
-        dialog.protocol("WM_DELETE_WINDOW", on_close)
-        dialog.grab_set()
 
         # 打开后立即尝试读取一次；之后每 30 秒自动刷新。
         refresh()
