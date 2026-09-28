@@ -1235,9 +1235,10 @@ class NirSoftCFScanner:
                     # 放干模式严格只使用当前账户，直到它进入保留线/CF拒绝。
                     order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
                 else:
-                    # 平衡模式使用 Worker 返回的完整轮换队列。
-                    # 队列通常为 1→6→5→4→3→2；账户达到保留线后由 Worker 自动移除。
-                    order = returned_order if returned_order else ([selected_account] if selected_account else [])
+                    # 平衡模式：只使用当前剩余额度最多的账户。
+                    # Worker 已按 usableRemaining 从高到低排序；额度刷新后重新比较并切换。
+                    # 不再把 1→6→5→4→3→2 全部轮流消耗。
+                    order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
             except Exception:
                 order = []
         if not order:
