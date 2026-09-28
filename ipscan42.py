@@ -2979,6 +2979,11 @@ class NirSoftCFScanner:
         total_var = tk.StringVar(value="总请求：—    总剩余：—")
         ttk.Label(bottom, textvariable=total_var).pack(side="left")
 
+        def on_close():
+            self.cf_quota_dialog = None
+            self.cf_quota_refreshing = False
+            dialog.destroy()
+
         refresh_button = ttk.Button(bottom, text="刷新额度", width=11)
         refresh_button.pack(side="right", padx=(6, 0))
         save_button = ttk.Button(bottom, text="保存配置", width=11)
@@ -3050,11 +3055,6 @@ class NirSoftCFScanner:
 
         refresh_button.config(command=refresh)
         save_button.config(command=save_config)
-
-        def on_close():
-            self.cf_quota_dialog = None
-            self.cf_quota_refreshing = False
-            dialog.destroy()
 
         # 打开后立即尝试读取一次；之后每 30 秒自动刷新。
         refresh()
