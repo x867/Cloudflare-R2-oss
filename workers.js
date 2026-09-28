@@ -112,7 +112,7 @@ export default {
 					const headerOK = headerPassword === (typeof 管理员密码 === 'string' ? 管理员密码.replace(/[\r\n]/g, '') : 管理员密码);
 					// 管理客户端可使用密码请求头，浏览器原有Cookie登录仍然兼容。
 					if (!cookieOK && !headerOK) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
-					if (访问路径 === 'admin/get6AccountUsage') {// 六账户额度统计：账户1后台统一读取，客户端不接触Account ID/Token
+					if (访问路径 === 'admin/get6accountusage') {// 六账户额度统计：账户1后台统一读取，客户端不接触Account ID/Token
 					try {
 						const Usage_JSON = await get6AccountWorkerUsage(env);
 						return new Response(JSON.stringify(Usage_JSON, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
