@@ -1207,15 +1207,27 @@ class NirSoftCFScanner:
             messagebox.showerror("保存失败", f"无法保存配置：\n{e}")
 
     def _set_cf_schedule(self, data):
-        """接收 Worker 的调度顺序；没有返回时按当前额度做本地兜底。"""
+        """接收 Worker 的调度决策；放干模式只使用当前选中账户，平衡模式按返回顺序轮换。"""
         order = []
+        selected_account = None
         schedule = data.get("schedule") if isinstance(data, dict) else None
         if isinstance(schedule, dict):
             try:
                 mode = str(schedule.get("mode", self.cf_schedule_mode)).lower()
                 if mode in ("balance", "drain"):
                     self.cf_schedule_mode = mode
-                order = [int(x) for x in schedule.get("order", []) if str(x).isdigit() and 1 <= int(x) <= 6]
+                raw_selected = schedule.get("selectedAccount")
+                if str(raw_selected).isdigit() and 1 <= int(raw_selected) <= 6:
+                    selected_account = int(raw_selected)
+                returned_order = [
+                    int(x) for x in schedule.get("order", [])
+                    if str(x).isdigit() and 1 <= int(x) <= 6
+                ]
+                if self.cf_schedule_mode == "drain":
+                    # 放干模式：严格只跑当前账户，达到保留线后由 Worker 切换到下一个账户。
+                    order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
+                else:
+                    order = returned_order
             except Exception:
                 order = []
         if not order:
@@ -1230,7 +1242,11 @@ class NirSoftCFScanner:
                     reserve = int(limit * reserve_pct / 100)
                     enriched.append((i + 1, remain, reserve))
                 if self.cf_schedule_mode == "drain":
-                    order = ([1] if enriched[0][1] > enriched[0][2] else []) + [6, 5, 4, 3, 2]
+                    eligible = [
+                        account for account, remain, reserve in enriched
+                        if remain > reserve
+                    ]
+                    order = [eligible[0]] if eligible else []
                 else:
                     eligible = [account for account, remain, reserve in enriched if remain > reserve]
                     if eligible:
@@ -1244,6 +1260,39 @@ class NirSoftCFScanner:
             with self.cf_schedule_lock:
                 self.cf_schedule_order = order
                 self.cf_schedule_pos = 0
+
+    def _sync_cf_schedule_to_worker(self, backend_url, password, mode, reserve1, reserve26, rotation_percent):
+        """把软件里的调度设置同步到账户1 Worker；失败只记录日志，不影响扫描。"""
+        try:
+            backend_url = self._normalize_cf_quota_backend_url(backend_url)
+            if not backend_url or not password:
+                return False
+            payload = json.dumps({
+                "scheduleMode": "drain" if str(mode).lower() == "drain" else "balance",
+                "reserve1Percent": max(0, min(100, int(reserve1))),
+                "reserveOtherPercent": max(0, min(100, int(reserve26))),
+                "rotationPercent": max(1, min(100, int(rotation_percent))),
+            }, ensure_ascii=False).encode("utf-8")
+            request = urllib.request.Request(
+                backend_url + "/admin/setschedule",
+                data=payload,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "CF-IP-Scanner/1.0",
+                    "X-Admin-Password": password,
+                },
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                body = response.read().decode("utf-8-sig", errors="replace")
+            data = json.loads(body or "{}")
+            if not data.get("success"):
+                raise RuntimeError(str(data.get("error") or data.get("msg") or "调度设置同步失败"))
+            return True
+        except Exception as e:
+            print("CF调度设置同步失败:", e)
+            return False
 
     def _next_cf_node_config(self):
         """按调度顺序选择下一组 UUID/SNI；配置行1~6分别对应账户1~6。"""
@@ -3062,6 +3111,18 @@ class NirSoftCFScanner:
             schedule_mode_text.set("放干模式" if schedule_mode_var.get() else "平衡模式")
             self.cf_quota_accounts["schedule_mode"] = self.cf_schedule_mode
             self.save_cf_quota_config(self.cf_quota_accounts)
+            threading.Thread(
+                target=self._sync_cf_schedule_to_worker,
+                args=(
+                    backend_var.get().strip(),
+                    password_var.get(),
+                    self.cf_schedule_mode,
+                    self.cf_reserve_account1,
+                    self.cf_reserve_accounts2_6,
+                    10,
+                ),
+                daemon=True
+            ).start()
         mode_box = ttk.Frame(bottom)
         mode_box.pack(side="left", padx=(18, 0))
         ttk.Checkbutton(mode_box, text="放干模式", variable=schedule_mode_var, command=on_schedule_mode_change).pack(side="left")
@@ -3111,9 +3172,21 @@ class NirSoftCFScanner:
                 self.cf_quota_accounts = config
                 self.cf_reserve_account1 = config["reserve_account1"]
                 self.cf_reserve_accounts2_6 = config["reserve_accounts2_6"]
+                threading.Thread(
+                    target=self._sync_cf_schedule_to_worker,
+                    args=(
+                        config["backend_url"],
+                        config["password"],
+                        config["schedule_mode"],
+                        config["reserve_account1"],
+                        config["reserve_accounts2_6"],
+                        10,
+                    ),
+                    daemon=True
+                ).start()
                 if not config["remember"]:
                     password_var.set("")
-                messagebox.showinfo("提示", "额度后台配置已保存。", parent=dialog)
+                messagebox.showinfo("提示", "额度后台配置已保存，调度设置正在同步。", parent=dialog)
             else:
                 messagebox.showerror("错误", "额度后台配置保存失败。", parent=dialog)
 
