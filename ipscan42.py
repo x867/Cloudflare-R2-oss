@@ -671,8 +671,9 @@ class NirSoftCFScanner:
             self.config_worker_entry.insert(0, self.worker_entry.get().strip())
 
         # 开始扫描时自动保存当前配置，无需再手动点击“保存”。
+        # 注意：不在配置页时不能重新读取隐藏的 SNI/UUID 文本框，
+        # 否则会把已经从 config.ini 读取的 UUID/SNI 清空。
         try:
-            self._config_read_current()
             self.save_node_configs_file()
         except Exception as e:
             print("自动保存 config.ini 失败:", e)
