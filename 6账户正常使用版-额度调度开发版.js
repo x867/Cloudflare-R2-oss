@@ -142,7 +142,16 @@ export default {
 						const errorResponse = { success: false, msg: '六账户额度查询失败：' + err.message, error: err.message };
 						return new Response(JSON.stringify(errorResponse, null, 2), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 					}
-				} else if (访问路径 === 'admin/log.json') {// 读取日志内容
+				} else if (访问路径 === 'admin/get6accountschedule') {// 六账户调度决策：供扫描软件按额度切换 UUID/SNI
+						try {
+							const mode = url.searchParams.get('mode') || 'balance';
+							const schedule = await 获取六账户调度(env, mode);
+							return new Response(JSON.stringify(schedule, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+						} catch (err) {
+							const errorResponse = { success: false, msg: '六账户调度读取失败：' + err.message, error: err.message };
+							return new Response(JSON.stringify(errorResponse, null, 2), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+						}
+					} else if (访问路径 === 'admin/log.json') {// 读取日志内容 {// 读取日志内容
 						const 读取日志内容 = await env.KV.get('log.json') || '[]';
 						return new Response(读取日志内容, { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 					} else if (区分大小写访问路径 === 'admin/getCloudflareUsage') {// 查询请求量
@@ -640,6 +649,41 @@ async function get6AccountWorkerUsage(env) {
 	const results = await Promise.all(accounts.map((accountTag, index) => queryOne(accountTag, tokens[index], index)));
 	const items = results.map((used, index) => ({ account: index + 1, todayUsed: used, todayRemaining: Math.max(0, limits[index] - used), todayLimit: limits[index] }));
 	return { success: true, updatedAt: now.toISOString(), accountCount: 6, todayUsedTotal: items.reduce((n, item) => n + item.todayUsed, 0), todayRemainingTotal: items.reduce((n, item) => n + item.todayRemaining, 0), accounts: items };
+}
+
+async function 获取六账户调度(env, mode = 'balance') {
+	const usage = await get6AccountWorkerUsage(env);
+	const accounts = Array.isArray(usage.accounts) ? usage.accounts : [];
+	if (accounts.length !== 6) throw new Error('六账户额度数据不完整');
+
+	const normalizedMode = String(mode || 'balance').toLowerCase() === 'drain' ? 'drain' : 'balance';
+	const reserve1Percent = 10;
+	const reserveOtherPercent = 5;
+
+	const enriched = accounts.map((item, index) => {
+		const limit = Math.max(0, Number(item.todayLimit) || 0);
+		const used = Math.max(0, Number(item.todayUsed) || 0);
+		const remaining = Math.max(0, Number(item.todayRemaining) || 0);
+		const reservePercent = index === 0 ? reserve1Percent : reserveOtherPercent;
+		const reserve = Math.floor(limit * reservePercent / 100);
+		const usableRemaining = Math.max(0, remaining - reserve);
+		const usedRatio = limit > 0 ? used / limit : 1;
+		return { account: index + 1, todayUsed: used, todayRemaining: remaining, todayLimit: limit, remainingRatio: limit > 0 ? remaining / limit : 0, usedRatio, reservePercent, reserve, usableRemaining };
+	});
+
+	let order = [];
+	if (normalizedMode === 'drain') {
+		// 账户1先用到保留10%，随后 6→5→4→3→2 依次放干。
+		if (enriched[0].todayRemaining > enriched[0].reserve) order.push(1);
+		for (const accountNo of [6, 5, 4, 3, 2]) order.push(accountNo);
+	} else {
+		// 平衡模式：账户1保留10%，账户2~6各保留5%，按已使用比例从低到高轮换。
+		order = enriched.filter(item => item.todayRemaining > item.reserve)
+			.sort((a, b) => a.usedRatio - b.usedRatio || a.account - b.account)
+			.map(item => item.account);
+	}
+
+	return { success: true, mode: normalizedMode, reserve: { account1Percent: reserve1Percent, accounts2to6Percent: reserveOtherPercent }, updatedAt: usage.updatedAt, todayUsedTotal: usage.todayUsedTotal, todayRemainingTotal: usage.todayRemainingTotal, order, accounts: enriched };
 }
 
 const HPACKHuffman码长 = [
