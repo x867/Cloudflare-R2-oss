@@ -754,8 +754,8 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		if (selectedAccount) order = [selectedAccount];
 	} else {
 		// 平衡模式：
-		// 所有高于各自保留线的账户参加轮换，优先选择“已使用比例最低”的账户，
-		// 从而避免某个账户因为固定排在前面而长期吃掉更多请求。
+		// 选择当前“已使用比例最低”的账户作为本轮唯一活动账户。
+		// 不把6个账户一次性下发给扫描软件，避免软件按每个节点快速跳号。
 		const eligible = enriched.filter(item => item.todayRemaining > item.reserve);
 		const rank = new Map(cycle.map((account, index) => [account, index]));
 		eligible.sort((a, b) => {
@@ -763,8 +763,8 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 			if (Math.abs(ratioDiff) > 1e-9) return ratioDiff;
 			return (rank.get(a.account) ?? 99) - (rank.get(b.account) ?? 99);
 		});
-		order = eligible.map(item => item.account);
-		selectedAccount = order[0] || null;
+		selectedAccount = eligible[0]?.account || null;
+		if (selectedAccount) order = [selectedAccount];
 	}
 
 	return {
