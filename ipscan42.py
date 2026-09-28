@@ -1235,10 +1235,9 @@ class NirSoftCFScanner:
                     # 放干模式严格只使用当前账户，直到它进入保留线/CF拒绝。
                     order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
                 else:
-                    # 平衡模式：只使用当前剩余额度最多的账户。
-                    # Worker 已按 usableRemaining 从高到低排序；额度刷新后重新比较并切换。
-                    # 不再把 1→6→5→4→3→2 全部轮流消耗。
-                    order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
+                    # 平衡模式：Worker 返回的 order 已按当前可用额度排序。
+                    # 保留完整队列，由 _next_cf_node_config 在每个新 Xray 实例间轮换。
+                    order = returned_order or ([selected_account] if selected_account else [])
             except Exception:
                 order = []
         if not order:
@@ -1259,12 +1258,14 @@ class NirSoftCFScanner:
                     ]
                     order = [eligible[0]] if eligible else []
                 else:
-                    eligible = [account for account, remain, reserve in enriched if remain > reserve]
-                    if eligible:
-                        with self.cf_schedule_lock:
-                            pos = self.cf_schedule_pos % len(eligible)
-                            order = eligible[pos:] + eligible[:pos]
-                            self.cf_schedule_pos += 1
+                    # 回退时按“可用余额从多到少”建立完整轮换队列。
+                    eligible = [
+                        (account, remain, reserve)
+                        for account, remain, reserve in enriched
+                        if remain > reserve
+                    ]
+                    eligible.sort(key=lambda item: max(0, item[1] - item[2]), reverse=True)
+                    order = [account for account, remain, reserve in eligible]
             except Exception:
                 order = []
         if order:
@@ -1401,12 +1402,15 @@ class NirSoftCFScanner:
         if not self.node_configs:
             return {"uuid": "", "sni": ""}
 
-        # 这里不能再按 cf_schedule_pos 每启动一个 Xray 实例就轮换一次。
-        # 否则同一轮调度期间会出现 1→6→5→4… 的请求乱跳，
-        # 绿色指示虽然指向当前账户，实际流量却会落到多个账户。
         with self.cf_schedule_lock:
             order = list(self.cf_schedule_order) or [1]
-            account = order[0]
+            if self.cf_schedule_mode == "drain":
+                # 放干模式：同一账户持续使用，直到 Worker 调度把它切走。
+                account = order[0]
+            else:
+                # 平衡模式：每启动一个新的 Xray 实例前进一格。
+                account = order[self.cf_schedule_pos % len(order)]
+                self.cf_schedule_pos = (self.cf_schedule_pos + 1) % len(order)
 
         index = account - 1
         if 0 <= index < len(self.node_configs):
