@@ -754,18 +754,15 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		if (selectedAccount) order = [selectedAccount];
 	} else {
 		// 平衡模式：
-		// 选择当前“已使用比例最低”的账户作为本轮唯一活动账户。
-		// 不把6个账户一次性下发给扫描软件，避免软件按每个节点快速跳号。
-		const eligible = enriched.filter(item => item.todayRemaining > item.reserve);
-		const rank = new Map(cycle.map((account, index) => [account, index]));
-		eligible.sort((a, b) => {
-			const ratioDiff = a.usedRatio - b.usedRatio;
-			if (Math.abs(ratioDiff) > 1e-9) return ratioDiff;
-			return (rank.get(a.account) ?? 99) - (rank.get(b.account) ?? 99);
+		// 按固定的 1→6→5→4→3→2 顺序轮换，账户达到各自保留线后退出轮换。
+		// 账户1保留 reserve1%，账户2~6保留 reserveOther%，避免某个账户被单独持续消耗。
+		const eligible = cycle.filter(account => {
+			const item = enriched[account - 1];
+			return item && item.todayRemaining > item.reserve;
 		});
-		// 平衡模式返回完整轮换队列，而不是只返回一个账户。
-		// 扫描软件会按这个队列逐个切换 UUID/SNI，避免某一个账户连续吃掉大量请求。
-		order = eligible.map(item => item.account);
+		// 返回完整轮换队列；扫描软件按队列逐个使用 UUID/SNI。
+		// 账户1达到保留线后自动从队列移除，随后继续 6→5→4→3→2。
+		order = eligible;
 		selectedAccount = order[0] || null;
 	}
 
