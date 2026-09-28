@@ -5245,7 +5245,7 @@ async function getCloudflareUsage(Email, GlobalAPIKey, AccountID, APIToken) {
 	}
 }
 
-function getSixAccountCredentials(env) {
+async function get6AccountWorkerUsage(env) {
 	// 账户1后台统一持有六账户凭据。客户端永远不会收到 Account ID / Token。
 	// 推荐：Account ID 使用 CF_ACCOUNT_1_ID ~ CF_ACCOUNT_6_ID，Token 使用对应 Secret。
 	// 兼容旧配置：CF_USAGE_ACCOUNTS / USAGE_ACCOUNTS 仍可作为六个 ID 的备用来源。
