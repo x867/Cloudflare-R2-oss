@@ -130,12 +130,31 @@ export default {
 								const limitParts = String(body?.limits || '').split(',').map(v => Number(v.trim()));
 								if (limitParts.length !== 6 || limitParts.some(v => !Number.isFinite(v) || v <= 0)) throw new Error('每日额度必须是6个正数，用逗号分隔');
 								const scheduleMode = body?.scheduleMode === 'drain' ? 'drain' : 'balance';
-								await 保存六账户配置(env, { accounts, limits: limitParts.map(v => Math.floor(v)), scheduleMode });
+								const reserve1Percent = Number(body?.reserve1Percent);
+								const reserveOtherPercent = Number(body?.reserveOtherPercent);
+								if (!Number.isFinite(reserve1Percent) || reserve1Percent < 0 || reserve1Percent > 100) throw new Error('账户1保留比例必须是0~100之间的数字');
+								if (!Number.isFinite(reserveOtherPercent) || reserveOtherPercent < 0 || reserveOtherPercent > 100) throw new Error('账户2~6保留比例必须是0~100之间的数字');
+								await 保存六账户配置(env, { accounts, limits: limitParts.map(v => Math.floor(v)), scheduleMode, reserve1Percent, reserveOtherPercent });
 								return new Response(JSON.stringify({ success: true, msg: '六账户配置已保存' }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 							} catch (err) { return new Response(JSON.stringify({ success: false, error: err.message }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } }); }
 						}
 						return new Response('Method Not Allowed', { status: 405 });
-					} else if (访问路径 === 'admin/get6accountusage') {// 六账户额度统计：账户1后台统一读取，客户端不接触Account ID/Token
+					} else if (访问路径 === 'admin/setschedule') {// 扫描软件同步调度模式与保留比例
+						if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+						try {
+							const body = await request.json();
+							const cfg = await 读取六账户配置(env);
+							const scheduleMode = body?.scheduleMode === 'drain' ? 'drain' : 'balance';
+							const reserve1Percent = Number(body?.reserve1Percent ?? cfg.reserve1Percent ?? 10);
+							const reserveOtherPercent = Number(body?.reserveOtherPercent ?? cfg.reserveOtherPercent ?? 5);
+							if (!Number.isFinite(reserve1Percent) || reserve1Percent < 0 || reserve1Percent > 100) throw new Error('账户1保留比例必须是0~100之间的数字');
+							if (!Number.isFinite(reserveOtherPercent) || reserveOtherPercent < 0 || reserveOtherPercent > 100) throw new Error('账户2~6保留比例必须是0~100之间的数字');
+							await 保存六账户配置(env, { accounts: cfg.accounts, limits: cfg.limits, scheduleMode, reserve1Percent, reserveOtherPercent });
+							return new Response(JSON.stringify({ success: true, scheduleMode, reserve1Percent, reserveOtherPercent }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+						} catch (err) {
+							return new Response(JSON.stringify({ success: false, error: err.message }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+						}
+						} else if (访问路径 === 'admin/get6accountusage') {// 六账户额度统计：账户1后台统一读取，客户端不接触Account ID/Token
 					try {
 						const Usage_JSON = await get6AccountWorkerUsage(env);
 						const scheduleMode = url.searchParams.get('mode') || '';
@@ -607,14 +626,14 @@ function 六账户默认额度(env) {
 }
 
 async function 读取六账户配置(env) {
-	const fromEnv = () => ({ accounts: Array.from({ length: 6 }, (_, i) => ({ id: String(env[`CF_ACCOUNT_${i + 1}_ID`] || '').trim(), token: String(env[`CF_ACCOUNT_${i + 1}_TOKEN`] || '').trim() })), limits: 六账户默认额度(env) });
+	const fromEnv = () => ({ accounts: Array.from({ length: 6 }, (_, i) => ({ id: String(env[`CF_ACCOUNT_${i + 1}_ID`] || '').trim(), token: String(env[`CF_ACCOUNT_${i + 1}_TOKEN`] || '').trim() })), limits: 六账户默认额度(env), scheduleMode: 'balance', reserve1Percent: 10, reserveOtherPercent: 5 });
 	if (!env.KV || typeof env.KV.get !== 'function') return fromEnv();
 	try {
 		const saved = await env.KV.get(六账户配置KV键);
 		if (!saved) return fromEnv();
 		const data = JSON.parse(saved);
 		if (!Array.isArray(data.accounts) || data.accounts.length !== 6) return fromEnv();
-		return { accounts: data.accounts.map(item => ({ id: String(item?.id || '').trim(), token: String(item?.token || '').trim() })), limits: Array.isArray(data.limits) && data.limits.length === 6 ? data.limits.map((v, i) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 六账户默认额度(env)[i]; }) : 六账户默认额度(env), scheduleMode: data.scheduleMode === 'drain' ? 'drain' : 'balance' };
+		return { accounts: data.accounts.map(item => ({ id: String(item?.id || '').trim(), token: String(item?.token || '').trim() })), limits: Array.isArray(data.limits) && data.limits.length === 6 ? data.limits.map((v, i) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 六账户默认额度(env)[i]; }) : 六账户默认额度(env), scheduleMode: data.scheduleMode === 'drain' ? 'drain' : 'balance', reserve1Percent: Number.isFinite(Number(data.reserve1Percent)) ? Math.min(100, Math.max(0, Number(data.reserve1Percent))) : 10, reserveOtherPercent: Number.isFinite(Number(data.reserveOtherPercent)) ? Math.min(100, Math.max(0, Number(data.reserveOtherPercent))) : 5 };
 	} catch (e) { return fromEnv(); }
 }
 
@@ -626,7 +645,7 @@ async function 保存六账户配置(env, data) {
 async function html六账户配置(env) {
 	const cfg = await 读取六账户配置(env);
 	const rows = cfg.accounts.map((item, i) => { const id = String(item.id || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); const configured = item.token ? '已保存 Token（留空不修改）' : '尚未配置 Token'; return `<div class="row"><div class="title">账户 ${i + 1}</div><input id="id${i + 1}" placeholder="Cloudflare Account ID" value="${id}"><input id="token${i + 1}" type="password" placeholder="${configured}"></div>`; }).join('');
-	return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>六账户额度配置</title><style>body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f5f6f8;margin:0;padding:24px;color:#222}.box{max-width:900px;margin:auto;background:#fff;border-radius:14px;padding:24px;box-shadow:0 4px 18px rgba(0,0,0,.08)}h2{margin:0 0 8px}.tip{color:#666;font-size:14px;margin-bottom:18px}.row{display:grid;grid-template-columns:90px 1fr 1fr;gap:10px;margin:10px 0;align-items:center}.title{font-weight:700}input{box-sizing:border-box;width:100%;padding:10px 12px;border:1px solid #d5d9e0;border-radius:8px;font-size:14px}.limit{margin-top:18px}.actions{display:flex;gap:10px;margin-top:20px}button,a{border:0;border-radius:8px;padding:10px 18px;text-decoration:none;cursor:pointer;font-size:14px}button{background:#2563eb;color:#fff}.back{background:#e5e7eb;color:#222}#msg{margin-top:14px;font-weight:600}@media(max-width:700px){.row{grid-template-columns:1fr}.title{margin-top:8px}}</style></head><body><div class="box"><h2>账户1 · 六账户额度配置</h2><div class="tip">直接配置账户1～6的 Cloudflare Account ID 和 Analytics Token。Token 不会在页面回显。</div>${rows}<div class="limit"><label>每日额度（账户1～6，用逗号分隔）</label><input id="limits" value="${cfg.limits.join(',')}"></div><div style="margin-top:18px;display:flex;align-items:center;gap:10px"><label style="font-weight:700">调度模式</label><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="drainMode" type="checkbox" ${cfg.scheduleMode === 'drain' ? 'checked' : ''} style="width:auto"> 放干模式</label><span id="modeText" style="color:#666">未勾选：平衡模式</span></div><div class="actions"><button onclick="saveCfg()">保存全部账户</button><a class="back" href="/admin">返回管理后台</a></div><div id="msg"></div></div><script>const drainMode=document.getElementById('drainMode'),modeText=document.getElementById('modeText');function updateModeText(){modeText.textContent=drainMode.checked?'已勾选：放干模式':'未勾选：平衡模式'}drainMode.addEventListener('change',updateModeText);updateModeText();async function saveCfg(){const msg=document.getElementById('msg');msg.textContent='正在保存…';const accounts=[];for(let i=1;i<=6;i++)accounts.push({id:document.getElementById('id'+i).value.trim(),token:document.getElementById('token'+i).value});try{const r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accounts,limits:document.getElementById('limits').value.trim(),scheduleMode:document.getElementById('drainMode').checked?'drain':'balance'})});const d=await r.json();msg.textContent=d.success?'保存成功 ✓':'保存失败：'+(d.error||d.msg||'未知错误')}catch(e){msg.textContent='保存失败：'+e.message}}</script></body></html>`;
+	return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>六账户额度配置</title><style>body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f5f6f8;margin:0;padding:24px;color:#222}.box{max-width:900px;margin:auto;background:#fff;border-radius:14px;padding:24px;box-shadow:0 4px 18px rgba(0,0,0,.08)}h2{margin:0 0 8px}.tip{color:#666;font-size:14px;margin-bottom:18px}.row{display:grid;grid-template-columns:90px 1fr 1fr;gap:10px;margin:10px 0;align-items:center}.title{font-weight:700}input{box-sizing:border-box;width:100%;padding:10px 12px;border:1px solid #d5d9e0;border-radius:8px;font-size:14px}.limit{margin-top:18px}.actions{display:flex;gap:10px;margin-top:20px}button,a{border:0;border-radius:8px;padding:10px 18px;text-decoration:none;cursor:pointer;font-size:14px}button{background:#2563eb;color:#fff}.back{background:#e5e7eb;color:#222}#msg{margin-top:14px;font-weight:600}@media(max-width:700px){.row{grid-template-columns:1fr}.title{margin-top:8px}}</style></head><body><div class="box"><h2>账户1 · 六账户额度配置</h2><div class="tip">直接配置账户1～6的 Cloudflare Account ID 和 Analytics Token。Token 不会在页面回显。</div>${rows}<div class="limit"><label>每日额度（账户1～6，用逗号分隔）</label><input id="limits" value="${cfg.limits.join(',')}"></div><div style="margin-top:18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><label style="font-weight:700">保留比例</label><label>账户1：<input id="reserve1Percent" type="number" min="0" max="100" step="0.1" value="${cfg.reserve1Percent ?? 10}" style="width:90px">%</label><label>账户2~6：<input id="reserveOtherPercent" type="number" min="0" max="100" step="0.1" value="${cfg.reserveOtherPercent ?? 5}" style="width:90px">%</label></div><div style="margin-top:18px;display:flex;align-items:center;gap:10px"><label style="font-weight:700">调度模式</label><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="drainMode" type="checkbox" ${cfg.scheduleMode === 'drain' ? 'checked' : ''} style="width:auto"> 放干模式</label><span id="modeText" style="color:#666">未勾选：平衡模式</span></div><div class="actions"><button onclick="saveCfg()">保存全部账户</button><a class="back" href="/admin">返回管理后台</a></div><div id="msg"></div></div><script>const drainMode=document.getElementById('drainMode'),modeText=document.getElementById('modeText');function updateModeText(){modeText.textContent=drainMode.checked?'已勾选：放干模式':'未勾选：平衡模式'}drainMode.addEventListener('change',updateModeText);updateModeText();async function saveCfg(){const msg=document.getElementById('msg');msg.textContent='正在保存…';const accounts=[];for(let i=1;i<=6;i++)accounts.push({id:document.getElementById('id'+i).value.trim(),token:document.getElementById('token'+i).value});try{const r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accounts,limits:document.getElementById('limits').value.trim(),scheduleMode:document.getElementById('drainMode').checked?'drain':'balance',reserve1Percent:document.getElementById('reserve1Percent').value,reserveOtherPercent:document.getElementById('reserveOtherPercent').value})});const d=await r.json();msg.textContent=d.success?'保存成功 ✓':'保存失败：'+(d.error||d.msg||'未知错误')}catch(e){msg.textContent='保存失败：'+e.message}}</script></body></html>`;
 }
 
 async function get6AccountWorkerUsage(env) {
@@ -662,8 +681,8 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 	const cfg = await 读取六账户配置(env);
 	const requestedMode = String(mode || '').trim().toLowerCase();
 	const normalizedMode = requestedMode === 'drain' || requestedMode === 'balance' ? requestedMode : (cfg.scheduleMode === 'drain' ? 'drain' : 'balance');
-	const reserve1Percent = 10;
-	const reserveOtherPercent = 5;
+	const reserve1Percent = Number.isFinite(Number(cfg.reserve1Percent)) ? Math.min(100, Math.max(0, Number(cfg.reserve1Percent))) : 10;
+	const reserveOtherPercent = Number.isFinite(Number(cfg.reserveOtherPercent)) ? Math.min(100, Math.max(0, Number(cfg.reserveOtherPercent))) : 5;
 
 	const enriched = accounts.map((item, index) => {
 		const limit = Math.max(0, Number(item.todayLimit) || 0);
