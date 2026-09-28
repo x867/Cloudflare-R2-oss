@@ -3115,12 +3115,6 @@ class NirSoftCFScanner:
             variable=remember_var
         ).grid(row=2, column=1, sticky="w", pady=(2, 6))
 
-        login_status_var = tk.StringVar(value="登录状态：未登录")
-        ttk.Label(
-            form,
-            textvariable=login_status_var
-        ).grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(2, 6))
-
         table = ttk.Frame(frame)
         table.pack(fill="both", expand=True)
 
@@ -3287,20 +3281,19 @@ class NirSoftCFScanner:
 
             self.cf_quota_refreshing = True
             refresh_button.config(state="disabled")
-            login_status_var.set("登录状态：正在读取额度……")
             total_var.set("正在连接账户1后台并读取账户1~6……")
             # 刷新额度时保留当前六账户数据，不清空表格，避免整版闪烁。
             # 后台读取完成后只更新发生变化的数字和状态。
             def progress_callback(message):
                 if dialog.winfo_exists():
                     try:
-                        dialog.after(0, lambda m=message: login_status_var.set("登录状态：" + m))
+                        dialog.after(0, lambda m=message: total_var.set(m))
                     except Exception:
                         pass
 
             threading.Thread(
                 target=self._refresh_cf_quota_worker,
-                args=(dialog, refresh_button, total_var, backend_url, username, password, progress_callback, login_status_var),
+                args=(dialog, refresh_button, total_var, backend_url, username, password, progress_callback),
                 daemon=True
             ).start()
 
@@ -3312,7 +3305,7 @@ class NirSoftCFScanner:
 
     def _refresh_cf_quota_worker(
         self, dialog, refresh_button, total_var,
-        backend_url, username, password, progress_callback=None, login_status_var=None
+        backend_url, username, password, progress_callback=None
     ):
         try:
             data = self._cf_quota_login_and_query(
@@ -3362,13 +3355,10 @@ class NirSoftCFScanner:
                 self._set_cf_schedule(getattr(self, "_last_cf_quota_data", {}))
             if total_requests is None:
                 error_text = next((x[4] for x in results if x[4]), "未知错误")
-                login_status_var.set(f"连接状态：失败 — {error_text}") if login_status_var is not None else None
-                total_var.set("连接失败，请检查后台地址 / 登录信息")
+                total_var.set(f"连接状态：失败 — {error_text}")
             else:
-                if login_status_var is not None:
-                    login_status_var.set("连接状态：已连接 ✓")
                 total_var.set(
-                    f"总请求：{total_requests:,}    总剩余：{total_remaining:,}"
+                    f"连接成功 ✓    总请求：{total_requests:,}    总剩余：{total_remaining:,}"
                 )
 
             self.cf_quota_refreshing = False
