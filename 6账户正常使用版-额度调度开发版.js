@@ -147,7 +147,7 @@ export default {
 					}
 				} else if (访问路径 === 'admin/get6accountschedule') {// 六账户调度决策：供扫描软件按额度切换 UUID/SNI
 						try {
-							const mode = url.searchParams.get('mode') || 'balance';
+							const mode = url.searchParams.get('mode') || '';
 							const schedule = await 获取六账户调度(env, mode);
 							return new Response(JSON.stringify(schedule, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 						} catch (err) {
