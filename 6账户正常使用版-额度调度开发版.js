@@ -692,18 +692,33 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		? Math.min(100, Math.max(0, Number(cfg.reserve1Percent))) : 10;
 	const reserveOtherPercent = Number.isFinite(Number(cfg.reserveOtherPercent))
 		? Math.min(100, Math.max(0, Number(cfg.reserveOtherPercent))) : 5;
+	const rotationPercent = Number.isFinite(Number(cfg.rotationPercent))
+		? Math.min(100, Math.max(1, Number(cfg.rotationPercent))) : 10;
 
-	// 固定调度优先顺序：账户1为主账户，备用账户按 6→5→4→3→2。
+	// 账户1是主账户；备用账户固定顺序为 6→5→4→3→2。
 	const cycle = [1, 6, 5, 4, 3, 2];
 
 	const enriched = accounts.map((item, index) => {
 		const limit = Math.max(0, Number(item.todayLimit) || 0);
 		const used = Math.max(0, Number(item.todayUsed) || 0);
 		const remaining = Math.max(0, Number(item.todayRemaining) || 0);
-		const reservePercent = index === 0 ? reserve1Percent : reserveOtherPercent;
+
+		// 平衡模式：账户1保留 reserve1%，账户2~6保留 reserveOther%。
+		// 放干模式：账户1仍保留 reserve1%，账户2~6不设软件保留线，允许一直放到 CF 实际停止/拒绝。
+		const reservePercent = normalizedMode === 'drain'
+			? (index === 0 ? reserve1Percent : 0)
+			: (index === 0 ? reserve1Percent : reserveOtherPercent);
 		const reserve = Math.floor(limit * reservePercent / 100);
 		const usableRemaining = Math.max(0, remaining - reserve);
 		const usedRatio = limit > 0 ? used / limit : 1;
+
+		// 一个轮换周期最多推进 rotationPercent 的额度；实际切换仍以最新额度查询结果为准。
+		const rotationChunk = Math.max(1, Math.floor(limit * rotationPercent / 100));
+		const rotationTargetUsed = Math.min(
+			Math.max(0, limit - reserve),
+			used + rotationChunk
+		);
+
 		return {
 			account: index + 1,
 			todayUsed: used,
@@ -713,27 +728,35 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 			usedRatio,
 			reservePercent,
 			reserve,
-			usableRemaining
+			usableRemaining,
+			rotationPercent,
+			rotationChunk,
+			rotationTargetUsed,
+			exhausted: remaining <= 0
 		};
 	});
-
-	const eligible = enriched.filter(item => item.todayRemaining > item.reserve);
 
 	let order = [];
 	let selectedAccount = null;
 
 	if (normalizedMode === 'drain') {
-		// 放干模式：账户1先使用到保留线；之后严格按 6→5→4→3→2 依次放干。
+		// 放干模式：
+		// 1. 账户1先使用到保留10%（或自定义保留比例）；
+		// 2. 然后严格 6→5→4→3→2 依次放干；
+		// 3. 账户2~6不再因为5%软件保留线提前退出，直到查询到余额为0。
 		if (enriched[0].todayRemaining > enriched[0].reserve) {
 			selectedAccount = 1;
 		} else {
-			selectedAccount = cycle.slice(1).find(account => enriched[account - 1].todayRemaining > enriched[account - 1].reserve) || null;
+			selectedAccount = cycle
+				.slice(1)
+				.find(account => enriched[account - 1].todayRemaining > 0) || null;
 		}
 		if (selectedAccount) order = [selectedAccount];
 	} else {
-		// 平衡模式：所有仍高于保留线的账户参与轮换。
-		// 每次以“已使用比例最低”的账户优先，达到自己的保留线后自动退出。
-		// 同比例时严格按 1→6→5→4→3→2 作为稳定顺序。
+		// 平衡模式：
+		// 所有高于各自保留线的账户参加轮换，优先选择“已使用比例最低”的账户，
+		// 从而避免某个账户因为固定排在前面而长期吃掉更多请求。
+		const eligible = enriched.filter(item => item.todayRemaining > item.reserve);
 		const rank = new Map(cycle.map((account, index) => [account, index]));
 		eligible.sort((a, b) => {
 			const ratioDiff = a.usedRatio - b.usedRatio;
@@ -749,9 +772,10 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		mode: normalizedMode,
 		selectedAccount,
 		overQuotaPossible: normalizedMode === 'drain',
+		rotationPercent,
 		reserve: {
 			account1Percent: reserve1Percent,
-			accounts2to6Percent: reserveOtherPercent
+			accounts2to6Percent: normalizedMode === 'drain' ? 0 : reserveOtherPercent
 		},
 		updatedAt: usage.updatedAt,
 		todayUsedTotal: usage.todayUsedTotal,
