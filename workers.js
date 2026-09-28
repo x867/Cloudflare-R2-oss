@@ -109,7 +109,15 @@ export default {
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
 					// 没有cookie或cookie错误，跳转到/login页面
 					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
-					if (访问路径 === 'admin/log.json') {// 读取日志内容
+					if (访问路径 === 'admin/get6AccountUsage') {// 六账户额度统计：账户1后台统一读取，客户端不接触Account ID/Token
+					try {
+						const Usage_JSON = await get6AccountWorkerUsage(env);
+						return new Response(JSON.stringify(Usage_JSON, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+					} catch (err) {
+						const errorResponse = { success: false, msg: '六账户额度查询失败：' + err.message, error: err.message };
+						return new Response(JSON.stringify(errorResponse, null, 2), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+					}
+				} else if (访问路径 === 'admin/log.json') {// 读取日志内容
 						const 读取日志内容 = await env.KV.get('log.json') || '[]';
 						return new Response(读取日志内容, { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 					} else if (区分大小写访问路径 === 'admin/getCloudflareUsage') {// 查询请求量
@@ -529,6 +537,82 @@ export default {
 	}
 };
 ///////////////////////////////////////////////////////////////////////叉HTTP传输数据///////////////////////////////////////////////
+async function get6AccountWorkerUsage(env) {
+	// 六个账户的Account ID和Analytics Token只从Worker变量读取，不返回给客户端。
+	const accounts = Array.from({ length: 6 }, (_, i) => String(env[`CF_ACCOUNT_${i + 1}_ID`] || '').trim());
+	if (accounts.some(v => !v)) throw new Error('请完整配置 CF_ACCOUNT_1_ID ~ CF_ACCOUNT_6_ID');
+	const tokenNames = [
+		'CF_ACCOUNT_1_TOKEN', 'CF_ACCOUNT_2_TOKEN', 'CF_ACCOUNT_3_TOKEN',
+		'CF_ACCOUNT_4_TOKEN', 'CF_ACCOUNT_5_TOKEN', 'CF_ACCOUNT_6_TOKEN'
+	];
+	const tokens = tokenNames.map(name => String(env[name] || '').trim());
+	const missing = tokens.findIndex(v => !v);
+	if (missing >= 0) throw new Error(`请配置账户${missing + 1}的 CF_ACCOUNT_${missing + 1}_TOKEN`);
+
+	const limitsText = String(env.CF_USAGE_LIMITS || '20000,100000,100000,100000,100000,100000');
+	const limits = limitsText.split(',').map((v, i) => {
+		const n = Number(v.trim());
+		return Number.isFinite(n) && n > 0 ? Math.floor(n) : (i === 0 ? 20000 : 100000);
+	});
+	while (limits.length < 6) limits.push(limits.length === 0 ? 20000 : 100000);
+
+	const now = new Date();
+	const todayStart = new Date(now);
+	todayStart.setUTCHours(0, 0, 0, 0);
+	const API = 'https://api.cloudflare.com/client/v4/graphql';
+	const query = `query GetWorkerUsage(\$accountTag: String!, \$todayStart: Time!, \$now: Time!) {
+	viewer {
+		accounts(filter: {accountTag: \$accountTag}) {
+			today: workersInvocationsAdaptive(limit: 10000, filter: {datetime_geq: \$todayStart, datetime_leq: \$now}) {
+				sum { requests }
+			}
+		}
+	}
+}`;
+
+	const queryOne = async (accountTag, token, index) => {
+		const response = await fetch(API, {
+			method: 'POST',
+			headers: {
+			'Authorization': `Bearer ${token}`,
+			'Accept': 'application/json',
+			'Content-Type': 'application/json'
+		},
+			body: JSON.stringify({
+				query,
+				variables: {
+					accountTag,
+					todayStart: todayStart.toISOString(),
+					now: now.toISOString()
+				}
+			})
+		});
+		if (!response.ok) throw new Error(`账户${index + 1} GraphQL HTTP ${response.status}`);
+		const data = await response.json();
+		if (data?.errors?.length) throw new Error(`账户${index + 1}: ${data.errors[0]?.message || 'GraphQL查询失败'}`);
+		const account = data?.data?.viewer?.accounts?.[0];
+		if (!account) throw new Error(`账户${index + 1}未返回账户数据`);
+		return Number(account?.today?.[0]?.sum?.requests || 0);
+	};
+
+	const results = await Promise.all(accounts.map((accountTag, index) => queryOne(accountTag, tokens[index], index)));
+	const items = results.map((used, index) => ({
+		account: index + 1,
+		todayUsed: used,
+		todayRemaining: Math.max(0, limits[index] - used),
+		todayLimit: limits[index]
+	}));
+	return {
+		success: true,
+		updatedAt: now.toISOString(),
+		accountCount: 6,
+		todayUsedTotal: items.reduce((n, item) => n + item.todayUsed, 0),
+		todayRemainingTotal: items.reduce((n, item) => n + item.todayRemaining, 0),
+		accounts: items
+	};
+}
+
+
 const HPACKHuffman码长 = [
 	13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28,
 	28, 28, 28, 28, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 28,
