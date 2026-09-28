@@ -1235,9 +1235,10 @@ class NirSoftCFScanner:
                     # 放干模式严格只使用当前账户，直到它进入保留线/CF拒绝。
                     order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
                 else:
-                    # 平衡模式保留 Worker 返回的完整轮换队列。
-                    # 每个 Xray 测试依次使用队列中的账户，避免单账户连续吃流量。
-                    order = returned_order if returned_order else ([selected_account] if selected_account else [])
+                    # 平衡模式只使用 Worker 当前选出的“用量最低账户”。
+                    # Worker 每次刷新额度后重新计算 selectedAccount，
+                    # 软件不再在多个账户之间机械轮询，避免把刚选中的低用量账户又平均摊回去。
+                    order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
             except Exception:
                 order = []
         if not order:
