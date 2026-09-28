@@ -621,10 +621,8 @@ class NirSoftCFScanner:
         if self.running:
             return
 
-        # 记录本次扫描开始时间，用于底部显示扫描计时。
-        self.scan_start_time = time.monotonic()
-        self.scan_elapsed = 0.0
-
+        # 扫描计时在这里暂不重置。
+        # 如果存在未完成断点，后面会继续使用已保存的累计时间。
         # 如果当前正在配置页，直接使用配置页里的最新内容，
         # 不要求用户先点“返回”或“保存”。
         if self.config_mode:
@@ -812,7 +810,13 @@ class NirSoftCFScanner:
                 self.tree.delete(item)
 
         self.running = True
-        self.scan_start_time = time.monotonic()
+        if self.resume_available and self.ip_list and self.tested < self.total:
+            # 续扫时保留上次累计计时，不从 0 开始。
+            self.scan_start_time = time.monotonic() - max(0.0, self.scan_elapsed)
+        else:
+            # 新一轮扫描从 0 开始计时。
+            self.scan_elapsed = 0.0
+            self.scan_start_time = time.monotonic()
 
         self.start_button.config(text="暂停")
         self.set_inputs_state(False)
