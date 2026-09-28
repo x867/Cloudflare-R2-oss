@@ -1235,10 +1235,9 @@ class NirSoftCFScanner:
                     # 放干模式严格只使用当前账户，直到它进入保留线/CF拒绝。
                     order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
                 else:
-                    # 平衡模式只使用 Worker 当前选出的“用量最低账户”。
-                    # Worker 每次刷新额度后重新计算 selectedAccount，
-                    # 软件不再在多个账户之间机械轮询，避免把刚选中的低用量账户又平均摊回去。
-                    order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
+                    # 平衡模式使用 Worker 返回的完整轮换队列。
+                    # 队列通常为 1→6→5→4→3→2；账户达到保留线后由 Worker 自动移除。
+                    order = returned_order if returned_order else ([selected_account] if selected_account else [])
             except Exception:
                 order = []
         if not order:
@@ -1269,8 +1268,18 @@ class NirSoftCFScanner:
                 order = []
         if order:
             with self.cf_schedule_lock:
+                old_order = list(self.cf_schedule_order)
+                old_pos = self.cf_schedule_pos
                 self.cf_schedule_order = order
-                self.cf_schedule_pos = 0
+                if self.cf_schedule_mode == "balance" and old_order:
+                    # 刷新额度时尽量保持当前轮换位置；如果当前账户已退出，则从新队列头开始。
+                    current_account = old_order[old_pos % len(old_order)] if old_pos < len(old_order) else None
+                    if current_account in order:
+                        self.cf_schedule_pos = order.index(current_account)
+                    else:
+                        self.cf_schedule_pos = 0
+                else:
+                    self.cf_schedule_pos = 0
 
     def _sync_cf_schedule_to_worker(self, backend_url, password, mode, reserve1, reserve26, rotation_percent):
         """把软件里的调度设置同步到账户1 Worker；失败只记录日志，不影响扫描。"""
