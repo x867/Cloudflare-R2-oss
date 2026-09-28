@@ -1396,19 +1396,26 @@ class NirSoftCFScanner:
             pass
 
     def _next_cf_node_config(self):
-        """按调度顺序选择下一组 UUID/SNI；配置行1~6分别对应账户1~6。"""
+        """使用当前调度选中的账户；只有额度调度刷新后发生切换，才切换 UUID/SNI。"""
 
         if not self.node_configs:
             return {"uuid": "", "sni": ""}
+
+        # 这里不能再按 cf_schedule_pos 每启动一个 Xray 实例就轮换一次。
+        # 否则同一轮调度期间会出现 1→6→5→4… 的请求乱跳，
+        # 绿色指示虽然指向当前账户，实际流量却会落到多个账户。
         with self.cf_schedule_lock:
             order = list(self.cf_schedule_order) or [1]
-            account = order[self.cf_schedule_pos % len(order)]
-            self.cf_schedule_pos += 1
+            account = order[0]
+
         index = account - 1
         if 0 <= index < len(self.node_configs):
             self._set_cf_active_account(account)
             node = self.node_configs[index]
-            return {"uuid": str(node.get("uuid", "")).strip(), "sni": str(node.get("sni", "")).strip()}
+            return {
+                "uuid": str(node.get("uuid", "")).strip(),
+                "sni": str(node.get("sni", "")).strip()
+            }
         return self.get_active_node_config()
 
     def get_active_node_config(self):
