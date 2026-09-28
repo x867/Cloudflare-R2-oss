@@ -107,8 +107,11 @@ export default {
 				} else if (访问路径 === 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
-					// 没有cookie或cookie错误，跳转到/login页面
-					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
+					const headerPassword = request.headers.get('X-Admin-Password') || '';
+					const cookieOK = !!authCookie && authCookie === await MD5MD5(UA + 加密秘钥 + 管理员密码);
+					const headerOK = headerPassword === (typeof 管理员密码 === 'string' ? 管理员密码.replace(/[\r\n]/g, '') : 管理员密码);
+					// 管理客户端可使用密码请求头，浏览器原有Cookie登录仍然兼容。
+					if (!cookieOK && !headerOK) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					if (访问路径 === 'admin/get6AccountUsage') {// 六账户额度统计：账户1后台统一读取，客户端不接触Account ID/Token
 					try {
 						const Usage_JSON = await get6AccountWorkerUsage(env);
@@ -575,6 +578,7 @@ async function get6AccountWorkerUsage(env) {
 			method: 'POST',
 			headers: {
 			'Authorization': `Bearer ${token}`,
+                'X-Rate-Limit-Type': 'account-based',
 			'Accept': 'application/json',
 			'Content-Type': 'application/json'
 		},
