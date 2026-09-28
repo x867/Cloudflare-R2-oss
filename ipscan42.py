@@ -196,8 +196,8 @@ class NirSoftCFScanner:
         # 六账户 Workers 请求额度
         self.quota_button = ttk.Button(
             top,
-            text="配置",
-            width=7,
+            text="CF配置",
+            width=8,
             command=self.open_cf_quota_manager
         )
         self.quota_button.pack(side="left", padx=(5, 0))
@@ -2988,12 +2988,17 @@ class NirSoftCFScanner:
             self.cf_quota_dialog = None
             self.cf_quota_refreshing = False
             dialog.destroy()
+            self.quota_button.config(
+                text="CF配置",
+                command=self.open_cf_quota_manager
+            )
+        self.quota_button.config(text="返回", command=on_close)
 
         refresh_button = ttk.Button(bottom, text="刷新额度", width=11)
         refresh_button.pack(side="right", padx=(6, 0))
         save_button = ttk.Button(bottom, text="保存配置", width=11)
         save_button.pack(side="right", padx=(6, 0))
-        ttk.Button(bottom, text="返回", width=9, command=on_close).pack(side="right")
+
 
         def save_config():
             config = {
