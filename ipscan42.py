@@ -91,6 +91,7 @@ class NirSoftCFScanner:
             self.cf_schedule_mode = "balance"
         self.cf_reserve_account1 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_account1", 10) or 10)))
         self.cf_reserve_accounts2_6 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_accounts2_6", 5) or 5)))
+        self.cf_rotation_percent = max(1, min(100, int(self.cf_quota_accounts.get("rotation_percent", 10) or 10)))
         self.cf_schedule_order = [1, 2, 3, 4, 5, 6]
         self.cf_schedule_pos = 0
         self.cf_schedule_lock = threading.Lock()
@@ -2889,6 +2890,7 @@ class NirSoftCFScanner:
             "schedule_mode": "balance",
             "reserve_account1": 10,
             "reserve_accounts2_6": 5,
+            "rotation_percent": 10,
         }
 
         try:
@@ -2906,6 +2908,7 @@ class NirSoftCFScanner:
                 "schedule_mode": "drain" if str(data.get("schedule_mode", "balance")).lower() == "drain" else "balance",
                 "reserve_account1": max(0, min(100, int(data.get("reserve_account1", 10) or 10))),
                 "reserve_accounts2_6": max(0, min(100, int(data.get("reserve_accounts2_6", 5) or 5))),
+                "rotation_percent": max(1, min(100, int(data.get("rotation_percent", 10) or 10))),
             }
         except Exception as e:
             print("读取 CF 额度后台配置失败:", e)
@@ -2923,6 +2926,7 @@ class NirSoftCFScanner:
                 "schedule_mode": "drain" if str(config.get("schedule_mode", "balance")).lower() == "drain" else "balance",
                 "reserve_account1": max(0, min(100, int(config.get("reserve_account1", 10) or 10))),
                 "reserve_accounts2_6": max(0, min(100, int(config.get("reserve_accounts2_6", 5) or 5))),
+                "rotation_percent": max(1, min(100, int(config.get("rotation_percent", 10) or 10))),
             }
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(safe, f, ensure_ascii=False, indent=2)
@@ -3179,7 +3183,7 @@ class NirSoftCFScanner:
                     self.cf_schedule_mode,
                     self.cf_reserve_account1,
                     self.cf_reserve_accounts2_6,
-                    10,
+                    self.cf_rotation_percent,
                 ),
                 daemon=True
             ).start()
@@ -3197,6 +3201,10 @@ class NirSoftCFScanner:
         ttk.Label(reserve_box, text="  账户2-6保留").pack(side="left", padx=(8, 0))
         reserve26_var = tk.StringVar(value=str(self.cf_reserve_accounts2_6))
         ttk.Entry(reserve_box, textvariable=reserve26_var, width=4).pack(side="left", padx=(3, 0))
+        ttk.Label(reserve_box, text="%").pack(side="left")
+        ttk.Label(reserve_box, text="  轮换").pack(side="left", padx=(8, 0))
+        rotation_var = tk.StringVar(value=str(self.cf_rotation_percent))
+        ttk.Entry(reserve_box, textvariable=rotation_var, width=4).pack(side="left", padx=(3, 0))
         ttk.Label(reserve_box, text="%").pack(side="left")
 
         def on_close():
@@ -3224,6 +3232,7 @@ class NirSoftCFScanner:
                 "schedule_mode": self.cf_schedule_mode,
                 "reserve_account1": max(0, min(100, int(reserve1_var.get().strip() or 10))),
                 "reserve_accounts2_6": max(0, min(100, int(reserve26_var.get().strip() or 5))),
+                "rotation_percent": max(1, min(100, int(rotation_var.get().strip() or 10))),
             }
             if not config["backend_url"]:
                 messagebox.showwarning("提示", "请填写额度后台地址。", parent=dialog)
@@ -3233,6 +3242,7 @@ class NirSoftCFScanner:
                 self.cf_runtime_password = config["password"]
                 self.cf_reserve_account1 = config["reserve_account1"]
                 self.cf_reserve_accounts2_6 = config["reserve_accounts2_6"]
+                self.cf_rotation_percent = config["rotation_percent"]
                 threading.Thread(
                     target=self._sync_cf_schedule_to_worker,
                     args=(
