@@ -98,6 +98,7 @@ class NirSoftCFScanner:
         self.cf_schedule_poll_stop = threading.Event()
         self.cf_schedule_poll_thread = None
         self.cf_runtime_password = str(self.cf_quota_accounts.get("password", ""))
+        self.cf_quota_active_account = None
         self.load_node_configs()
 
         # 表头排序状态
@@ -1355,8 +1356,35 @@ class NirSoftCFScanner:
             if self.cf_schedule_poll_stop.wait(CF_QUOTA_REFRESH_SECONDS):
                 break
 
+    def _set_cf_active_account(self, account):
+        """只更新当前实际轮换到的账户标识，不刷新整张额度表。"""
+        try:
+            account = int(account)
+        except Exception:
+            return
+        if account < 1 or account > 6:
+            return
+        self.cf_quota_active_account = account
+
+        def apply():
+            if self.closing:
+                return
+            for i, row in enumerate(self.cf_quota_rows):
+                active = (i + 1) == account
+                row["name"].set(f"● 账户{i + 1}" if active else f"账户{i + 1}")
+                try:
+                    row["name_label"].configure(foreground="#008000" if active else "#333333")
+                except Exception:
+                    pass
+
+        try:
+            self.root.after(0, apply)
+        except Exception:
+            pass
+
     def _next_cf_node_config(self):
         """按调度顺序选择下一组 UUID/SNI；配置行1~6分别对应账户1~6。"""
+
         if not self.node_configs:
             return {"uuid": "", "sni": ""}
         with self.cf_schedule_lock:
@@ -1365,6 +1393,7 @@ class NirSoftCFScanner:
             self.cf_schedule_pos += 1
         index = account - 1
         if 0 <= index < len(self.node_configs):
+            self._set_cf_active_account(account)
             node = self.node_configs[index]
             return {"uuid": str(node.get("uuid", "")).strip(), "sni": str(node.get("sni", "")).strip()}
         return self.get_active_node_config()
@@ -3138,9 +3167,8 @@ class NirSoftCFScanner:
             limit_var = tk.StringVar(value="—")
             status_var = tk.StringVar(value="未连接")
 
-            ttk.Label(table, textvariable=name_var, anchor="center", width=widths[0]).grid(
-                row=i + 1, column=0, padx=2, pady=3
-            )
+            name_label = ttk.Label(table, textvariable=name_var, anchor="center", width=widths[0])
+            name_label.grid(row=i + 1, column=0, padx=2, pady=3)
             ttk.Label(table, textvariable=requests_var, anchor="center", width=widths[1]).grid(
                 row=i + 1, column=1, padx=2, pady=3
             )
@@ -3156,6 +3184,7 @@ class NirSoftCFScanner:
 
             self.cf_quota_rows.append({
                 "name": name_var,
+                "name_label": name_label,
                 "requests": requests_var,
                 "remain": remain_var,
                 "limit": limit_var,
@@ -3288,12 +3317,8 @@ class NirSoftCFScanner:
             refresh_button.config(state="disabled")
             login_status_var.set("登录状态：正在登录……")
             total_var.set("正在连接账户1后台并读取账户1~6……")
-            for row in self.cf_quota_rows:
-                row["status"].set("读取中…")
-                row["requests"].set("—")
-                row["remain"].set("—")
-                row["limit"].set("—")
-
+            # 刷新额度时保留当前六账户数据，不清空表格，避免整版闪烁。
+            # 后台读取完成后只更新发生变化的数字和状态。
             def progress_callback(message):
                 if dialog.winfo_exists():
                     try:
