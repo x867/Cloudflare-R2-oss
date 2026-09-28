@@ -137,7 +137,9 @@ export default {
 						return new Response('Method Not Allowed', { status: 405 });
 					} else if (访问路径 === 'admin/get6accountusage') {// 六账户额度统计：账户1后台统一读取，客户端不接触Account ID/Token
 					try {
-						const Usage_JSON = await get6AccountWorkerUsage(env);
+						const Usage_JSON = await get6AccountWorkerUsage(env);
+						const scheduleMode = url.searchParams.get('mode') || '';
+						Usage_JSON.schedule = await 获取六账户调度(env, scheduleMode, Usage_JSON);
 						return new Response(JSON.stringify(Usage_JSON, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 					} catch (err) {
 						const errorResponse = { success: false, msg: '六账户额度查询失败：' + err.message, error: err.message };
@@ -652,8 +654,8 @@ async function get6AccountWorkerUsage(env) {
 	return { success: true, updatedAt: now.toISOString(), accountCount: 6, todayUsedTotal: items.reduce((n, item) => n + item.todayUsed, 0), todayRemainingTotal: items.reduce((n, item) => n + item.todayRemaining, 0), accounts: items };
 }
 
-async function 获取六账户调度(env, mode = 'balance') {
-	const usage = await get6AccountWorkerUsage(env);
+async function 获取六账户调度(env, mode = '', usageOverride = null) {
+	const usage = usageOverride || await get6AccountWorkerUsage(env);
 	const accounts = Array.isArray(usage.accounts) ? usage.accounts : [];
 	if (accounts.length !== 6) throw new Error('六账户额度数据不完整');
 
