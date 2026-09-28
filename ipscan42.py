@@ -2982,6 +2982,13 @@ class NirSoftCFScanner:
         if not password:
             raise RuntimeError("请先填写后台密码")
 
+        # 额度读取使用独立 opener；这里直接带 X-Admin-Password，
+        # 不需要重复执行 /login，但必须保留 opener 供 HTTP 请求使用。
+        cookie_jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(cookie_jar)
+        )
+
         # 额度读取直接使用 Worker 支持的 X-Admin-Password 请求头。
         # 不再每次自动刷新都重复执行 /login，避免“登录成功”标签反复出现。
         if progress_callback:
