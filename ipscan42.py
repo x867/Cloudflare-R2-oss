@@ -2872,7 +2872,7 @@ class NirSoftCFScanner:
             progress_callback("登录成功，正在读取账户1~6额度……")
 
         usage_request = urllib.request.Request(
-            backend_url + "/admin/get6AccountUsage",
+            backend_url + "/admin/get6AccountUsage?mode=" + urllib.parse.quote(self.cf_schedule_mode),
             method="GET",
             headers={
                 "Accept": "application/json",
@@ -2921,28 +2921,6 @@ class NirSoftCFScanner:
         accounts = data.get("accounts")
         if not isinstance(accounts, list) or len(accounts) != 6:
             raise RuntimeError("后台没有返回完整的账户1~6数据")
-
-        # Worker 端提供统一的调度顺序；软件只负责按这个顺序把 UUID/SNI 应用到下一次 Xray 测试。
-        try:
-            schedule_mode = self.cf_schedule_mode if self.cf_schedule_mode in ("balance", "drain") else "balance"
-            schedule_request = urllib.request.Request(
-                backend_url + "/admin/get6accountschedule?mode=" + urllib.parse.quote(schedule_mode),
-                method="GET",
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "CF-IP-Scanner/1.0",
-                    "X-Admin-Password": password,
-                },
-            )
-            with opener.open(schedule_request, timeout=20) as response:
-                schedule_body = response.read().decode("utf-8-sig", errors="replace").strip().lstrip("\ufeff")
-            schedule_json = json.loads(schedule_body) if schedule_body else {}
-            if schedule_json.get("success") and isinstance(schedule_json.get("order"), list):
-                order = [int(x) for x in schedule_json["order"] if str(x).isdigit() and 1 <= int(x) <= 6]
-                if order:
-                    data["schedule"] = schedule_json
-        except Exception as e:
-            data["schedule_error"] = str(e)
 
         if progress_callback:
             progress_callback("登录成功，六账户额度读取完成")
