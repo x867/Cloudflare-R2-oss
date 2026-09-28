@@ -89,6 +89,8 @@ class NirSoftCFScanner:
         self.cf_schedule_mode = str(self.cf_quota_accounts.get("schedule_mode", "balance")).lower()
         if self.cf_schedule_mode not in ("balance", "drain"):
             self.cf_schedule_mode = "balance"
+        self.cf_reserve_account1 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_account1", 10) or 10)))
+        self.cf_reserve_accounts2_6 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_accounts2_6", 5) or 5)))
         self.cf_schedule_order = [1, 2, 3, 4, 5, 6]
         self.cf_schedule_pos = 0
         self.cf_schedule_lock = threading.Lock()
@@ -1224,7 +1226,8 @@ class NirSoftCFScanner:
                     item = accounts[i] if i < len(accounts) else {}
                     limit = max(0, int(item.get("todayLimit", 0) or 0))
                     remain = max(0, int(item.get("todayRemaining", 0) or 0))
-                    reserve = int(limit * (10 if i == 0 else 5) / 100)
+                    reserve_pct = self.cf_reserve_account1 if i == 0 else self.cf_reserve_accounts2_6
+                    reserve = int(limit * reserve_pct / 100)
                     enriched.append((i + 1, remain, reserve))
                 if self.cf_schedule_mode == "drain":
                     order = ([1] if enriched[0][1] > enriched[0][2] else []) + [6, 5, 4, 3, 2]
@@ -2775,6 +2778,8 @@ class NirSoftCFScanner:
             "password": "",
             "remember": False,
             "schedule_mode": "balance",
+            "reserve_account1": 10,
+            "reserve_accounts2_6": 5,
         }
 
         try:
@@ -2790,6 +2795,8 @@ class NirSoftCFScanner:
                 "password": str(data.get("password", "")),
                 "remember": bool(data.get("remember", False)),
                 "schedule_mode": "drain" if str(data.get("schedule_mode", "balance")).lower() == "drain" else "balance",
+                "reserve_account1": max(0, min(100, int(data.get("reserve_account1", 10) or 10))),
+                "reserve_accounts2_6": max(0, min(100, int(data.get("reserve_accounts2_6", 5) or 5))),
             }
         except Exception as e:
             print("读取 CF 额度后台配置失败:", e)
@@ -2805,6 +2812,8 @@ class NirSoftCFScanner:
                 "password": str(config.get("password", "")) if config.get("remember") else "",
                 "remember": bool(config.get("remember", False)),
                 "schedule_mode": "drain" if str(config.get("schedule_mode", "balance")).lower() == "drain" else "balance",
+                "reserve_account1": max(0, min(100, int(config.get("reserve_account1", 10) or 10))),
+                "reserve_accounts2_6": max(0, min(100, int(config.get("reserve_accounts2_6", 5) or 5))),
             }
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(safe, f, ensure_ascii=False, indent=2)
@@ -3058,6 +3067,17 @@ class NirSoftCFScanner:
         ttk.Checkbutton(mode_box, text="放干模式", variable=schedule_mode_var, command=on_schedule_mode_change).pack(side="left")
         ttk.Label(mode_box, textvariable=schedule_mode_text, width=8).pack(side="left", padx=(4, 0))
 
+        reserve_box = ttk.Frame(bottom)
+        reserve_box.pack(side="left", padx=(18, 0))
+        ttk.Label(reserve_box, text="账户1保留").pack(side="left")
+        reserve1_var = tk.StringVar(value=str(self.cf_reserve_account1))
+        ttk.Entry(reserve_box, textvariable=reserve1_var, width=4).pack(side="left", padx=(3, 0))
+        ttk.Label(reserve_box, text="%").pack(side="left")
+        ttk.Label(reserve_box, text="  账户2-6保留").pack(side="left", padx=(8, 0))
+        reserve26_var = tk.StringVar(value=str(self.cf_reserve_accounts2_6))
+        ttk.Entry(reserve_box, textvariable=reserve26_var, width=4).pack(side="left", padx=(3, 0))
+        ttk.Label(reserve_box, text="%").pack(side="left")
+
         def on_close():
             self.cf_quota_dialog = None
             self.cf_quota_refreshing = False
@@ -3081,12 +3101,16 @@ class NirSoftCFScanner:
                 "password": password_var.get(),
                 "remember": bool(remember_var.get()),
                 "schedule_mode": self.cf_schedule_mode,
+                "reserve_account1": max(0, min(100, int(reserve1_var.get().strip() or 10))),
+                "reserve_accounts2_6": max(0, min(100, int(reserve26_var.get().strip() or 5))),
             }
             if not config["backend_url"]:
                 messagebox.showwarning("提示", "请填写额度后台地址。", parent=dialog)
                 return
             if self.save_cf_quota_config(config):
                 self.cf_quota_accounts = config
+                self.cf_reserve_account1 = config["reserve_account1"]
+                self.cf_reserve_accounts2_6 = config["reserve_accounts2_6"]
                 if not config["remember"]:
                     password_var.set("")
                 messagebox.showinfo("提示", "额度后台配置已保存。", parent=dialog)
