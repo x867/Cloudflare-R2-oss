@@ -346,9 +346,10 @@ export default {
   close.addEventListener('click',function(){panel.style.display='none';});
 })();
 </script>`;
-						const 新页面 = /<\/body>/i.test(h)
-			? h.replace(/<\/body>/i, 六账户外挂 + '</body>')
-			: h + 六账户外挂;
+						const 六账户诊断标记 = '<div id="cf6-diagnostic" style="position:fixed;left:12px;bottom:12px;z-index:2147483647;background:#16a34a;color:#fff;padding:8px 12px;border-radius:8px;font:700 13px/1 Arial,Microsoft YaHei,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.2);">CF6_TEST_2026</div>';
+		const 新页面 = /<\/body>/i.test(h)
+			? h.replace(/<\/body>/i, 六账户外挂 + 六账户诊断标记 + '</body>')
+			: h + 六账户外挂 + 六账户诊断标记;
 		return 新页面;
 					})()), { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-store' } });
 				} else if (访问路径 === 'logout' || uuidRegex.test(访问路径)) {//清除cookie并跳转到登录页面
