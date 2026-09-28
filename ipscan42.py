@@ -86,6 +86,12 @@ class NirSoftCFScanner:
         self.cf_quota_refreshing = False
         self.cf_quota_dialog = None
         self.cf_quota_rows = []
+        self.cf_schedule_mode = str(self.cf_quota_accounts.get("schedule_mode", "balance")).lower()
+        if self.cf_schedule_mode not in ("balance", "drain"):
+            self.cf_schedule_mode = "balance"
+        self.cf_schedule_order = [1, 2, 3, 4, 5, 6]
+        self.cf_schedule_pos = 0
+        self.cf_schedule_lock = threading.Lock()
         self.load_node_configs()
 
         # 表头排序状态
@@ -1198,15 +1204,67 @@ class NirSoftCFScanner:
         except Exception as e:
             messagebox.showerror("保存失败", f"无法保存配置：\n{e}")
 
+    def _set_cf_schedule(self, data):
+        """接收 Worker 的调度顺序；没有返回时按当前额度做本地兜底。"""
+        order = []
+        schedule = data.get("schedule") if isinstance(data, dict) else None
+        if isinstance(schedule, dict):
+            try:
+                mode = str(schedule.get("mode", self.cf_schedule_mode)).lower()
+                if mode in ("balance", "drain"):
+                    self.cf_schedule_mode = mode
+                order = [int(x) for x in schedule.get("order", []) if str(x).isdigit() and 1 <= int(x) <= 6]
+            except Exception:
+                order = []
+        if not order:
+            accounts = data.get("accounts", []) if isinstance(data, dict) else []
+            try:
+                enriched = []
+                for i in range(6):
+                    item = accounts[i] if i < len(accounts) else {}
+                    limit = max(0, int(item.get("todayLimit", 0) or 0))
+                    remain = max(0, int(item.get("todayRemaining", 0) or 0))
+                    reserve = int(limit * (10 if i == 0 else 5) / 100)
+                    enriched.append((i + 1, remain, reserve))
+                if self.cf_schedule_mode == "drain":
+                    order = ([1] if enriched[0][1] > enriched[0][2] else []) + [6, 5, 4, 3, 2]
+                else:
+                    eligible = [account for account, remain, reserve in enriched if remain > reserve]
+                    if eligible:
+                        with self.cf_schedule_lock:
+                            pos = self.cf_schedule_pos % len(eligible)
+                            order = eligible[pos:] + eligible[:pos]
+                            self.cf_schedule_pos += 1
+            except Exception:
+                order = []
+        if order:
+            with self.cf_schedule_lock:
+                self.cf_schedule_order = order
+                self.cf_schedule_pos = 0
+
+    def _next_cf_node_config(self):
+        """按调度顺序选择下一组 UUID/SNI；配置行1~6分别对应账户1~6。"""
+        if not self.node_configs:
+            return {"uuid": "", "sni": ""}
+        with self.cf_schedule_lock:
+            order = list(self.cf_schedule_order) or [1]
+            account = order[self.cf_schedule_pos % len(order)]
+            self.cf_schedule_pos += 1
+        index = account - 1
+        if 0 <= index < len(self.node_configs):
+            node = self.node_configs[index]
+            return {"uuid": str(node.get("uuid", "")).strip(), "sni": str(node.get("sni", "")).strip()}
+        return self.get_active_node_config()
+
     def get_active_node_config(self):
         """返回当前选中的 UUID/SNI；不再回退到 test.json 的内置值。"""
         if not self.node_configs:
             return {"uuid": "", "sni": ""}
         return self.node_configs[min(self.config_index, len(self.node_configs) - 1)]
 
-    def apply_node_config(self, config):
-        """把当前 UUID/SNI 应用到 Xray 配置；空值会清除模板中的内置值。"""
-        node = self.get_active_node_config()
+    def apply_node_config(self, config, node_override=None):
+        """把 UUID/SNI 应用到 Xray 配置；空值会清除模板中的内置值。"""
+        node = node_override if node_override is not None else self.get_active_node_config()
         uuid = str(node.get("uuid", "")).strip()
         sni = str(node.get("sni", "")).strip()
 
@@ -1498,7 +1556,8 @@ class NirSoftCFScanner:
             with open(template_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
-            self.apply_node_config(config)
+            scheduled_node = self._next_cf_node_config()
+            self.apply_node_config(config, scheduled_node)
 
             # 为每个 Xray 实例分配独立 SOCKS 端口，避免 10 路互相抢端口。
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -2715,6 +2774,7 @@ class NirSoftCFScanner:
             "username": "",
             "password": "",
             "remember": False,
+            "schedule_mode": "balance",
         }
 
         try:
@@ -2729,6 +2789,7 @@ class NirSoftCFScanner:
                 "username": str(data.get("username", "")).strip(),
                 "password": str(data.get("password", "")),
                 "remember": bool(data.get("remember", False)),
+                "schedule_mode": "drain" if str(data.get("schedule_mode", "balance")).lower() == "drain" else "balance",
             }
         except Exception as e:
             print("读取 CF 额度后台配置失败:", e)
@@ -2743,6 +2804,7 @@ class NirSoftCFScanner:
                 "username": str(config.get("username", "")).strip(),
                 "password": str(config.get("password", "")) if config.get("remember") else "",
                 "remember": bool(config.get("remember", False)),
+                "schedule_mode": "drain" if str(config.get("schedule_mode", "balance")).lower() == "drain" else "balance",
             }
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(safe, f, ensure_ascii=False, indent=2)
@@ -2859,6 +2921,28 @@ class NirSoftCFScanner:
         accounts = data.get("accounts")
         if not isinstance(accounts, list) or len(accounts) != 6:
             raise RuntimeError("后台没有返回完整的账户1~6数据")
+
+        # Worker 端提供统一的调度顺序；软件只负责按这个顺序把 UUID/SNI 应用到下一次 Xray 测试。
+        try:
+            schedule_mode = self.cf_schedule_mode if self.cf_schedule_mode in ("balance", "drain") else "balance"
+            schedule_request = urllib.request.Request(
+                backend_url + "/admin/get6accountschedule?mode=" + urllib.parse.quote(schedule_mode),
+                method="GET",
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "CF-IP-Scanner/1.0",
+                    "X-Admin-Password": password,
+                },
+            )
+            with opener.open(schedule_request, timeout=20) as response:
+                schedule_body = response.read().decode("utf-8-sig", errors="replace").strip().lstrip("\ufeff")
+            schedule_json = json.loads(schedule_body) if schedule_body else {}
+            if schedule_json.get("success") and isinstance(schedule_json.get("order"), list):
+                order = [int(x) for x in schedule_json["order"] if str(x).isdigit() and 1 <= int(x) <= 6]
+                if order:
+                    data["schedule"] = schedule_json
+        except Exception as e:
+            data["schedule_error"] = str(e)
 
         if progress_callback:
             progress_callback("登录成功，六账户额度读取完成")
@@ -2984,6 +3068,18 @@ class NirSoftCFScanner:
         total_var = tk.StringVar(value="总请求：—    总剩余：—")
         ttk.Label(bottom, textvariable=total_var).pack(side="left")
 
+        schedule_mode_var = tk.BooleanVar(value=self.cf_schedule_mode == "drain")
+        schedule_mode_text = tk.StringVar(value="放干模式" if schedule_mode_var.get() else "平衡模式")
+        def on_schedule_mode_change():
+            self.cf_schedule_mode = "drain" if schedule_mode_var.get() else "balance"
+            schedule_mode_text.set("放干模式" if schedule_mode_var.get() else "平衡模式")
+            self.cf_quota_accounts["schedule_mode"] = self.cf_schedule_mode
+            self.save_cf_quota_config(self.cf_quota_accounts)
+        mode_box = ttk.Frame(bottom)
+        mode_box.pack(side="left", padx=(18, 0))
+        ttk.Checkbutton(mode_box, text="放干模式", variable=schedule_mode_var, command=on_schedule_mode_change).pack(side="left")
+        ttk.Label(mode_box, textvariable=schedule_mode_text, width=8).pack(side="left", padx=(4, 0))
+
         def on_close():
             self.cf_quota_dialog = None
             self.cf_quota_refreshing = False
@@ -3006,6 +3102,7 @@ class NirSoftCFScanner:
                 "username": username_var.get().strip(),
                 "password": password_var.get(),
                 "remember": bool(remember_var.get()),
+                "schedule_mode": self.cf_schedule_mode,
             }
             if not config["backend_url"]:
                 messagebox.showwarning("提示", "请填写额度后台地址。", parent=dialog)
@@ -3077,6 +3174,7 @@ class NirSoftCFScanner:
             data = self._cf_quota_login_and_query(
                 backend_url, username, password, progress_callback=progress_callback
             )
+            self._last_cf_quota_data = data
             accounts = data.get("accounts", [])
             total_requests = int(data.get("todayUsedTotal", 0) or 0)
             total_remaining = int(data.get("todayRemainingTotal", 0) or 0)
@@ -3116,6 +3214,8 @@ class NirSoftCFScanner:
                 row["limit"].set(f"{limit:,}")
                 row["status"].set("正常" if remain > 0 else "已到上限")
 
+            if total_requests is not None:
+                self._set_cf_schedule(getattr(self, "_last_cf_quota_data", {}))
             if total_requests is None:
                 error_text = next((x[4] for x in results if x[4]), "未知错误")
                 login_status_var.set(f"登录状态：失败 — {error_text}") if login_status_var is not None else None
