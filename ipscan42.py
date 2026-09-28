@@ -528,8 +528,8 @@ class NirSoftCFScanner:
             print("读取扫描断点失败:", e)
 
     def save_scan_checkpoint(self):
-        """保存未完成扫描的 IP、已完成项和列表结果。"""
-        if not self.ip_list or self.tested >= self.total:
+        """保存扫描进度、累计计时和列表结果；暂停/关闭/重启都保留计时，只有“清空列表”才清零。"""
+        if not self.ip_list:
             return
         rows = []
         for item_id in self.tree.get_children(""):
@@ -3610,6 +3610,9 @@ class NirSoftCFScanner:
         self.closing = True
         if self.running:
             self.pause_scan()
+        else:
+            # 关闭软件也保存最后一次累计计时；只有“清空列表”才会删除断点并清零。
+            self.save_scan_checkpoint()
         self.root.destroy()
 
 
