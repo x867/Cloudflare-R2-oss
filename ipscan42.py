@@ -3251,7 +3251,7 @@ class NirSoftCFScanner:
                         config["schedule_mode"],
                         config["reserve_account1"],
                         config["reserve_accounts2_6"],
-                        10,
+                        config["rotation_percent"],
                     ),
                     daemon=True
                 ).start()
