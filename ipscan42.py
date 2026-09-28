@@ -1231,11 +1231,9 @@ class NirSoftCFScanner:
                     int(x) for x in schedule.get("order", [])
                     if str(x).isdigit() and 1 <= int(x) <= 6
                 ]
-                if self.cf_schedule_mode == "drain":
-                    # 放干模式：严格只跑当前账户，达到保留线后由 Worker 切换到下一个账户。
-                    order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
-                else:
-                    order = returned_order
+                # 无论平衡还是放干，都只锁定 Worker 当前选中的一个账户。
+                # 这样同一轮扫描不会因为每个节点而快速跳到其他账户。
+                order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
             except Exception:
                 order = []
         if not order:
@@ -2978,49 +2976,16 @@ class NirSoftCFScanner:
 
     def _cf_quota_login_and_query(self, backend_url, username, password, progress_callback=None):
         """登录账户1后台，然后由账户1后台统一返回账户1~6额度。"""
-        if progress_callback:
-            progress_callback("正在登录账户1后台……")
         backend_url = self._normalize_cf_quota_backend_url(backend_url)
         if not backend_url:
             raise RuntimeError("请先填写额度后台地址")
         if not password:
             raise RuntimeError("请先填写后台密码")
 
-        cookie_jar = http.cookiejar.CookieJar()
-        opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(cookie_jar)
-        )
-
-        # 当前 workers.js 的 /login 按原 CF账户按钮方式只提交 password。
-        # 登录名仅作为界面兼容字段，不参与实际登录请求。
-        login_data = urllib.parse.urlencode({
-            "password": password,
-        }).encode("utf-8")
-
-        login_request = urllib.request.Request(
-            backend_url + "/login",
-            data=login_data,
-            method="POST",
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-                "User-Agent": "CF-IP-Scanner/1.0",
-            },
-        )
-
-        with opener.open(login_request, timeout=15) as response:
-            login_body = response.read().decode("utf-8-sig", errors="replace")
-
-        try:
-            login_json = json.loads(login_body)
-        except Exception:
-            login_json = {}
-
-        if not login_json.get("success"):
-            raise RuntimeError("额度后台登录失败，请检查后台地址和密码")
-
+        # 额度读取直接使用 Worker 支持的 X-Admin-Password 请求头。
+        # 不再每次自动刷新都重复执行 /login，避免“登录成功”标签反复出现。
         if progress_callback:
-            progress_callback("登录成功，正在读取账户1~6额度……")
+            progress_callback("正在读取账户1~6额度……")
 
         usage_request = urllib.request.Request(
             backend_url + "/admin/get6AccountUsage?mode=" + urllib.parse.quote(self.cf_schedule_mode),
@@ -3315,7 +3280,7 @@ class NirSoftCFScanner:
 
             self.cf_quota_refreshing = True
             refresh_button.config(state="disabled")
-            login_status_var.set("登录状态：正在登录……")
+            login_status_var.set("登录状态：正在读取额度……")
             total_var.set("正在连接账户1后台并读取账户1~6……")
             # 刷新额度时保留当前六账户数据，不清空表格，避免整版闪烁。
             # 后台读取完成后只更新发生变化的数字和状态。
@@ -3390,11 +3355,11 @@ class NirSoftCFScanner:
                 self._set_cf_schedule(getattr(self, "_last_cf_quota_data", {}))
             if total_requests is None:
                 error_text = next((x[4] for x in results if x[4]), "未知错误")
-                login_status_var.set(f"登录状态：失败 — {error_text}") if login_status_var is not None else None
+                login_status_var.set(f"连接状态：失败 — {error_text}") if login_status_var is not None else None
                 total_var.set("连接失败，请检查后台地址 / 登录信息")
             else:
                 if login_status_var is not None:
-                    login_status_var.set("登录状态：已登录 ✓")
+                    login_status_var.set("连接状态：已连接 ✓")
                 total_var.set(
                     f"总请求：{total_requests:,}    总剩余：{total_remaining:,}"
                 )
