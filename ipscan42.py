@@ -94,6 +94,9 @@ class NirSoftCFScanner:
         self.cf_schedule_order = [1, 2, 3, 4, 5, 6]
         self.cf_schedule_pos = 0
         self.cf_schedule_lock = threading.Lock()
+        self.cf_schedule_poll_stop = threading.Event()
+        self.cf_schedule_poll_thread = None
+        self.cf_runtime_password = str(self.cf_quota_accounts.get("password", ""))
         self.load_node_configs()
 
         # 表头排序状态
@@ -451,6 +454,7 @@ class NirSoftCFScanner:
         if not self.running:
             return
         self.scan_stop_event.set()
+        self.stop_cf_schedule_poller()
         self.running = False
         self.scan_elapsed = (
             time.monotonic() - self.scan_start_time
@@ -564,6 +568,7 @@ class NirSoftCFScanner:
         """扫描全部完成：清除断点，下一次开始重新扫描。"""
         self.running = False
         self.scan_stop_event.set()
+        self.stop_cf_schedule_poller()
         self.xray_stop_event.set()
         self.force_stop_all_xray()
         self.force_stop_xray()
@@ -812,6 +817,7 @@ class NirSoftCFScanner:
 
         self.scan_stop_event.clear()
         self.xray_stop_event.clear()
+        self.start_cf_schedule_poller()
 
         if not self.resume_available:
             for item in self.tree.get_children():
@@ -1293,6 +1299,60 @@ class NirSoftCFScanner:
         except Exception as e:
             print("CF调度设置同步失败:", e)
             return False
+
+    def start_cf_schedule_poller(self):
+        """扫描期间后台轮询 Worker 调度；只更新账户选择，不改扫描/Xray核心逻辑。"""
+        if self.cf_schedule_poll_thread is not None and self.cf_schedule_poll_thread.is_alive():
+            return
+        self.cf_schedule_poll_stop.clear()
+        self.cf_schedule_poll_thread = threading.Thread(
+            target=self._cf_schedule_poller,
+            daemon=True
+        )
+        self.cf_schedule_poll_thread.start()
+
+    def stop_cf_schedule_poller(self):
+        """暂停/关闭扫描时停止调度轮询。"""
+        self.cf_schedule_poll_stop.set()
+        thread = self.cf_schedule_poll_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.2)
+        self.cf_schedule_poll_thread = None
+
+    def _cf_schedule_poller(self):
+        """每30秒向账户1 Worker询问最新六账户额度与调度结果。"""
+        while not self.closing and not self.cf_schedule_poll_stop.is_set():
+            try:
+                backend_url = self._normalize_cf_quota_backend_url(
+                    self.cf_quota_accounts.get("backend_url", "")
+                )
+                password = self.cf_runtime_password or str(
+                    self.cf_quota_accounts.get("password", "")
+                )
+                if backend_url and password:
+                    mode = "drain" if self.cf_schedule_mode == "drain" else "balance"
+                    request = urllib.request.Request(
+                        backend_url + "/admin/get6accountschedule?mode=" + urllib.parse.quote(mode),
+                        method="GET",
+                        headers={
+                            "Accept": "application/json",
+                            "User-Agent": "CF-IP-Scanner/1.0",
+                            "X-Admin-Password": password,
+                        },
+                    )
+                    with urllib.request.urlopen(request, timeout=20) as response:
+                        body = response.read().decode("utf-8-sig", errors="replace")
+                    data = json.loads(body or "{}")
+                    if data.get("success"):
+                        self._last_cf_quota_data = data
+                        self._set_cf_schedule(data)
+                    else:
+                        print("CF调度读取失败:", data.get("error") or data.get("msg") or "未知错误")
+            except Exception as e:
+                print("CF调度轮询失败:", e)
+
+            if self.cf_schedule_poll_stop.wait(CF_QUOTA_REFRESH_SECONDS):
+                break
 
     def _next_cf_node_config(self):
         """按调度顺序选择下一组 UUID/SNI；配置行1~6分别对应账户1~6。"""
@@ -3170,6 +3230,7 @@ class NirSoftCFScanner:
                 return
             if self.save_cf_quota_config(config):
                 self.cf_quota_accounts = config
+                self.cf_runtime_password = config["password"]
                 self.cf_reserve_account1 = config["reserve_account1"]
                 self.cf_reserve_accounts2_6 = config["reserve_accounts2_6"]
                 threading.Thread(
@@ -3205,6 +3266,7 @@ class NirSoftCFScanner:
                 messagebox.showwarning("提示", "请先填写后台密码。", parent=dialog)
                 return
 
+            self.cf_runtime_password = password
             self.cf_quota_accounts = {
                 "backend_url": backend_url,
                 "username": username,
