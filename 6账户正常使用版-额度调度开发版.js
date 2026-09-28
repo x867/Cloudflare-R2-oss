@@ -753,16 +753,20 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		}
 		if (selectedAccount) order = [selectedAccount];
 	} else {
-		// 平衡模式：
-		// 按固定的 1→6→5→4→3→2 顺序轮换，账户达到各自保留线后退出轮换。
-		// 账户1保留 reserve1%，账户2~6保留 reserveOther%，避免某个账户被单独持续消耗。
+		// 平衡模式：余额越多的账户优先参与轮换。
+		// 账户1保留 reserve1%，账户2~6保留 reserveOther%，低于各自保留线后退出轮换。
+		// 同余额时仍按 1→6→5→4→3→2 作为稳定的次级顺序。
 		const eligible = cycle.filter(account => {
 			const item = enriched[account - 1];
 			return item && item.todayRemaining > item.reserve;
 		});
-		// 返回完整轮换队列；扫描软件按队列逐个使用 UUID/SNI。
-		// 账户1达到保留线后自动从队列移除，随后继续 6→5→4→3→2。
-		order = eligible;
+		order = eligible.sort((a, b) => {
+			const ra = enriched[a - 1]?.usableRemaining || 0;
+			const rb = enriched[b - 1]?.usableRemaining || 0;
+			return rb - ra;
+		});
+		// 返回按当前剩余额度从多到少排列的完整轮换队列；
+		// 扫描软件按该队列逐个使用 UUID/SNI，额度刷新后重新排序。
 		selectedAccount = order[0] || null;
 	}
 
