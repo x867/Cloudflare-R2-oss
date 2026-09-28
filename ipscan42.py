@@ -1231,9 +1231,13 @@ class NirSoftCFScanner:
                     int(x) for x in schedule.get("order", [])
                     if str(x).isdigit() and 1 <= int(x) <= 6
                 ]
-                # 无论平衡还是放干，都只锁定 Worker 当前选中的一个账户。
-                # 这样同一轮扫描不会因为每个节点而快速跳到其他账户。
-                order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
+                if self.cf_schedule_mode == "drain":
+                    # 放干模式严格只使用当前账户，直到它进入保留线/CF拒绝。
+                    order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
+                else:
+                    # 平衡模式保留 Worker 返回的完整轮换队列。
+                    # 每个 Xray 测试依次使用队列中的账户，避免单账户连续吃流量。
+                    order = returned_order if returned_order else ([selected_account] if selected_account else [])
             except Exception:
                 order = []
         if not order:
