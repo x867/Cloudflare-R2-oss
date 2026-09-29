@@ -912,12 +912,18 @@ class NirSoftCFScanner:
                     except Exception: number = 999999
                     sections.append((number, section))
                 sections.sort(key=lambda x: x[0])
+                shared_uuid = ""
                 for number, section in sections:
                     uuid = parser.get(section, "uuid", fallback="").strip()
                     raw = parser.get(section, "sni", fallback="").strip()
                     snis = list(dict.fromkeys([x.strip() for x in re.split(r"[,，;；\n]+", raw) if x.strip()]))
-                    if uuid or snis:
+                    if number == 1 and uuid:
+                        shared_uuid = uuid
+                    if snis or uuid:
                         self.node_configs.append({"account": number, "uuid": uuid, "snis": snis, "sni": snis[0] if snis else ""})
+                if shared_uuid:
+                    for item in self.node_configs:
+                        item["uuid"] = shared_uuid
         except Exception as e:
             print("读取 config.ini 失败:", e)
         while len(self.node_configs) < 6:
@@ -944,8 +950,10 @@ class NirSoftCFScanner:
             if not isinstance(snis, list):
                 snis = [str(item.get("sni", "")).strip()] if item.get("sni") else []
             snis = list(dict.fromkeys([str(x).strip() for x in snis if str(x).strip()]))
+            # 六个子账户共用账户1的 UUID；这里只保存一份逻辑上的公共 UUID。
+            shared_uuid = str(self.node_configs[0].get("uuid", "")).strip() if self.node_configs else ""
             parser[section] = {
-                "uuid": str(item.get("uuid", "")).strip(),
+                "uuid": shared_uuid,
                 "sni": ",".join(snis),
             }
         with open(self.config_file, "w", encoding="utf-8") as f:
@@ -1036,7 +1044,7 @@ class NirSoftCFScanner:
         return {"uuid": uuid, "sni": sni}
 
     def auto_fetch_six_worker_configs(self):
-        """通过账户1 Worker 的后台接口自动发现账户1~6的 Worker 地址，再读取实际 UUID/SNI。"""
+        """只从账户1获取公共 UUID；账户1~6分别发现自己的 SNI/域名。"""
         if getattr(self, "config_readonly", False):
             return
 
@@ -1049,7 +1057,7 @@ class NirSoftCFScanner:
             messagebox.showwarning("无法自动获取", "没有配置账户1 Worker 地址。\n请先在“CF配置”中设置账户1的 Worker 地址。")
             return
         if not password:
-            messagebox.showwarning("提示", "自动获取需要 Worker 管理员密码。\n请在“CF配置”中勾选“保存登录信息”后再获取。")
+            messagebox.showwarning("提示", "自动获取需要账户1 Worker 管理员密码。\n请在“CF配置”中保存登录信息后再获取。")
             return
 
         try:
@@ -1059,39 +1067,31 @@ class NirSoftCFScanner:
 
         def worker():
             results = []
+            shared_uuid = ""
             try:
-                last_error = None
-                body = ""
-                status = 0
-                for attempt in range(3):
-                    request = urllib.request.Request(
-                        backend_url.rstrip("/") + "/admin/get6workerinfo",
-                        method="GET",
-                        headers={
-                            "Accept": "application/json",
-                            "Accept-Encoding": "identity",
-                            "Connection": "close",
-                            "User-Agent": "CF-IP-Scanner/1.0",
-                            "X-Admin-Password": password,
-                        },
-                    )
-                    try:
-                        with urllib.request.urlopen(request, timeout=30) as response:
-                            chunks = []
-                            while True:
-                                chunk = response.read(65536)
-                                if not chunk:
-                                    break
-                                chunks.append(chunk)
-                            body = b"".join(chunks).decode("utf-8-sig", errors="replace")
-                            status = response.getcode()
-                        break
-                    except (http.client.IncompleteRead, urllib.error.URLError, TimeoutError, ConnectionError) as e:
-                        last_error = e
-                        if attempt < 2:
-                            time.sleep(0.8 * (attempt + 1))
-                            continue
-                        raise RuntimeError(f"读取账户1 Worker 自动发现结果失败：{e}") from e
+                request = urllib.request.Request(
+                    backend_url.rstrip("/") + "/admin/get6workerinfo",
+                    method="GET",
+                    headers={
+                        "Accept": "application/json",
+                        "Accept-Encoding": "identity",
+                        "Connection": "close",
+                        "User-Agent": "CF-IP-Scanner/1.0",
+                        "X-Admin-Password": password,
+                    },
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=30) as response:
+                        chunks = []
+                        while True:
+                            chunk = response.read(65536)
+                            if not chunk:
+                                break
+                            chunks.append(chunk)
+                        body = b"".join(chunks).decode("utf-8-sig", errors="replace")
+                        status = response.getcode()
+                except Exception as e:
+                    raise RuntimeError(f"读取账户1 Worker 自动发现结果失败：{e}") from e
 
                 if status != 200:
                     raise RuntimeError(f"账户1 Worker 自动发现接口 HTTP {status}")
@@ -1100,6 +1100,7 @@ class NirSoftCFScanner:
                     data = json.loads(body or "{}")
                 except Exception as e:
                     raise RuntimeError("账户1 Worker 返回的不是有效 JSON") from e
+
                 if not data.get("success"):
                     raise RuntimeError(str(data.get("error") or data.get("msg") or "六账户 Worker 自动发现失败"))
 
@@ -1107,65 +1108,102 @@ class NirSoftCFScanner:
                 if len(discovered) != 6:
                     raise RuntimeError("Worker 返回的六账户发现结果不完整")
 
-                for item in discovered:
-                    account = int(item.get("account") or 0)
-                    candidates = item.get("candidates") or []
-                    info = None
-                    error = str(item.get("error") or "").strip()
-                    tried = []
+                # 只认账户1的 UUID。账户2~6即使返回 uuid 也完全忽略。
+                account1 = next((item for item in discovered if int(item.get("account") or 0) == 1), None)
+                if not isinstance(account1, dict):
+                    raise RuntimeError("自动发现结果中没有账户1")
 
-                    # 优先使用账户1后台已经直接读取到的 UUID/SNI。
-                    # 这样不再要求扫描软件用账户1密码登录账户2~6的 Worker。
-                    direct = item.get("nodeinfo")
-                    if isinstance(direct, dict):
-                        direct_uuid = str(direct.get("uuid") or "").strip()
-                        direct_sni = str(direct.get("sni") or "").strip()
-                        raw_snis = direct.get("snis") if isinstance(direct.get("snis"), list) else []
-                        snis = list(dict.fromkeys([str(x).strip() for x in raw_snis if str(x).strip()]))
-                        if direct_sni and direct_sni not in snis: snis.insert(0, direct_sni)
-                        if direct_uuid and snis:
-                            info = {"uuid": direct_uuid, "sni": snis[0], "snis": snis,
-                                    "worker_url": str(direct.get("workerUrl") or "").strip()}
+                direct1 = account1.get("nodeinfo")
+                if isinstance(direct1, dict):
+                    shared_uuid = str(direct1.get("uuid") or "").strip()
 
-                    # workers.dev 和外部自定义域名都可以作为 EdgeTunnel 入口。
-                    # 不再依赖候选顺序：逐个尝试，任何一个能返回 /admin/nodeinfo
-                    # 的地址都算成功。这样即使第一个地址是 workers.dev，
-                    # 也会继续尝试后面的外部域名。
-                    for candidate in candidates:
-                        if isinstance(candidate, dict):
-                            url = str(candidate.get("url") or candidate.get("hostname") or "").strip()
-                        else:
-                            url = str(candidate or "").strip()
+                # 如果后台没有直接给账户1 nodeinfo，则尝试账户1候选地址。
+                if not shared_uuid:
+                    candidates1 = account1.get("candidates") or []
+                    for candidate in candidates1:
+                        url = str(candidate.get("url") or candidate.get("hostname") or "").strip() if isinstance(candidate, dict) else str(candidate or "").strip()
                         if not url:
                             continue
                         try:
-                            info = self._fetch_worker_nodeinfo(url, password)
-                            info["worker_url"] = self._normalize_worker_info_url(url)
-                            break
-                        except Exception as e:
-                            tried.append(f"{url}: {e}")
+                            info1 = self._fetch_worker_nodeinfo(url, password)
+                            shared_uuid = str(info1.get("uuid") or "").strip()
+                            if shared_uuid:
+                                break
+                        except Exception:
+                            continue
 
-                    if info:
+                if not shared_uuid:
+                    raise RuntimeError("账户1没有获取到 UUID，请检查账户1权限或 Worker 配置。")
+
+                # 六个子账户只取自己的 SNI/域名，统一使用账户1 UUID。
+                for item in discovered:
+                    account = int(item.get("account") or 0)
+                    if not 1 <= account <= 6:
+                        continue
+
+                    candidates = item.get("candidates") or []
+                    info = None
+                    error = str(item.get("error") or "").strip()
+
+                    direct = item.get("nodeinfo")
+                    if isinstance(direct, dict):
+                        raw_snis = direct.get("snis") if isinstance(direct.get("snis"), list) else []
+                        direct_sni = str(direct.get("sni") or "").strip()
+                        snis = list(dict.fromkeys([str(x).strip() for x in raw_snis if str(x).strip()]))
+                        if direct_sni and direct_sni not in snis:
+                            snis.insert(0, direct_sni)
+                        if snis:
+                            info = {"snis": snis}
+
+                    # 账户1优先使用已经取得的 nodeinfo；其他账户只尝试读取 SNI。
+                    for candidate in candidates:
+                        if info and info.get("snis"):
+                            break
+                        url = str(candidate.get("url") or candidate.get("hostname") or "").strip() if isinstance(candidate, dict) else str(candidate or "").strip()
+                        if not url:
+                            continue
+                        try:
+                            ni = self._fetch_worker_nodeinfo(url, password)
+                            candidate_sni = str(ni.get("sni") or "").strip()
+                            if candidate_sni:
+                                info = {"snis": [candidate_sni]}
+                                break
+                        except Exception as e:
+                            error = f"{url}: {e}"
+
+                    if info and info.get("snis"):
                         results.append((account - 1, info, None))
                     else:
-                        if tried:
-                            error = "；".join(tried[-6:])
-                        results.append((account - 1, None, error or "未找到可访问的 EdgeTunnel Worker"))
+                        results.append((account - 1, None, error or "未找到可访问的 SNI/域名"))
+
             except Exception as e:
                 error = str(e)
                 results = [(i, None, error) for i in range(6)]
 
             def apply():
                 try:
+                    # 公共 UUID 永远只来自账户1。
                     for i, info, error in results:
                         if info is not None:
                             while len(self.node_configs) <= i:
                                 self.node_configs.append({"account": len(self.node_configs)+1, "uuid": "", "snis": [], "sni": ""})
-                            snis = list(dict.fromkeys([str(x).strip() for x in (info.get("snis") or [info.get("sni", "")]) if str(x).strip()]))
-                            self.node_configs[i] = {"account": i + 1, "uuid": str(info.get("uuid", "")).strip(), "snis": snis, "sni": snis[0] if snis else ""}
+                            snis = list(dict.fromkeys([str(x).strip() for x in (info.get("snis") or []) if str(x).strip()]))
+                            self.node_configs[i] = {
+                                "account": i + 1,
+                                "uuid": shared_uuid,
+                                "snis": snis,
+                                "sni": snis[0] if snis else ""
+                            }
+
+                    # 即使某些账户 SNI 读取失败，也让所有已有账户共用账户1 UUID。
+                    if shared_uuid:
+                        while len(self.node_configs) < 6:
+                            self.node_configs.append({"account": len(self.node_configs)+1, "uuid": "", "snis": [], "sni": ""})
+                        for item in self.node_configs[:6]:
+                            item["uuid"] = shared_uuid
 
                     success_count = sum(1 for _, info, _ in results if info is not None)
-                    if success_count:
+                    if shared_uuid:
                         self._config_show_current()
                         self.save_node_configs_file()
                         self.config_index = min(self.config_index, len(self.node_configs) - 1)
@@ -1174,10 +1212,13 @@ class NirSoftCFScanner:
                     if failed:
                         messagebox.showwarning(
                             "自动获取完成",
-                            f"已获取并保存 {success_count}/6 个账户的 UUID/SNI。\n\n" + "\n".join(failed)
+                            f"账户1公共 UUID 已获取；SNI 已获取 {success_count}/6 个账户。\n\n" + "\n".join(failed)
                         )
                     else:
-                        messagebox.showinfo("自动获取完成", "已自动发现六个账户的 Worker，并获取实际 UUID/SNI。\n结果已自动保存到扫描配置。")
+                        messagebox.showinfo(
+                            "自动获取完成",
+                            "已获取账户1公共 UUID，并发现六个子账户的 SNI/域名。\n结果已自动保存。"
+                        )
                 finally:
                     try:
                         self.config_auto_fetch_button.config(state="normal")
