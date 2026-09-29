@@ -3219,7 +3219,7 @@ class NirSoftCFScanner:
             value = "https://" + value
         parsed = urllib.parse.urlsplit(value)
         if not parsed.netloc:
-            raise RuntimeError("额度后台地址格式错误，请填写域名，例如：rrx.ccwu.cc")
+            raise RuntimeError("额度后台地址格式错误，请填写实际配置的后台域名")
         return f"{parsed.scheme.lower()}://{parsed.netloc}"
 
     def _cf_quota_login_and_query(self, backend_url, username, password, progress_callback=None):
@@ -3366,9 +3366,7 @@ class NirSoftCFScanner:
 
         ttk.Label(form, text="后台地址：").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
         backend_saved = str(self.cf_quota_accounts.get("backend_url", "")).strip()
-        if not backend_saved:
-            backend_saved = "rrx.ccwu.cc"
-        elif re.match(r"^https?://", backend_saved, re.I):
+        if backend_saved and re.match(r"^https?://", backend_saved, re.I):
             parsed_saved = urllib.parse.urlsplit(backend_saved)
             backend_saved = parsed_saved.netloc or backend_saved
         else:
