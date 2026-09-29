@@ -752,19 +752,14 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		if (selectedAccount) order = [selectedAccount];
 	} else {
 		// 平衡模式：
-		// 账户1保留10%（可设置），账户2~6保留5%（可设置）。
-		// 所有高于各自保留线的账户都参与轮换。
-		// 优先让“当前使用比例最低”的账户进入队列，从而让六账户的请求量逐步趋于平均。
-		// 使用固定 cycle 作为同使用比例时的稳定排序：1 → 6 → 5 → 4 → 3 → 2。
-		const cycleRank = new Map(cycle.map((account, index) => [account, index]));
-		order = enriched
-			.filter(item => item.todayRemaining > item.reserve)
-			.sort((a, b) => {
-				const ratioDiff = a.usedRatio - b.usedRatio;
-				if (Math.abs(ratioDiff) > 0.000001) return ratioDiff;
-				return cycleRank.get(a.account) - cycleRank.get(b.account);
-			})
-			.map(item => item.account);
+		// 固定按 1 → 6 → 5 → 4 → 3 → 2 轮换。
+		// 账户1剩余到保留线（默认10%）后退出轮换；
+		// 账户2~6剩余到保留线（默认5%）后退出轮换。
+		// 不再根据 usedRatio 动态重新排序，避免额度刷新后绿色账户不断跳变。
+		order = cycle.filter(account => {
+			const item = enriched[account - 1];
+			return item && item.todayRemaining > item.reserve;
+		});
 		selectedAccount = order[0] || null;
 	}
 
