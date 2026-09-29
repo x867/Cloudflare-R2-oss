@@ -894,7 +894,7 @@ class NirSoftCFScanner:
     # ========================================================
 
     def load_node_configs(self):
-        """从 config.ini 读取网段以及 UUID + SNI 配对配置。"""
+        """读取六账户配置：一个账户一个 UUID，可绑定多个 SNI/域名。"""
         self.node_configs = []
         try:
             if os.path.isfile(self.config_file):
@@ -905,25 +905,26 @@ class NirSoftCFScanner:
                 self.saved_workers = parser.get("Scan", "workers", fallback="").strip()
                 sections = []
                 for section in parser.sections():
-                    if not section.lower().startswith("node"):
-                        continue
-                    try:
-                        number = int(section[4:])
-                    except Exception:
-                        number = 999999
+                    low = section.lower()
+                    prefix = "account" if low.startswith("account") else ("node" if low.startswith("node") else "")
+                    if not prefix: continue
+                    try: number = int(section[len(prefix):])
+                    except Exception: number = 999999
                     sections.append((number, section))
                 sections.sort(key=lambda x: x[0])
-                for _, section in sections:
+                for number, section in sections:
                     uuid = parser.get(section, "uuid", fallback="").strip()
-                    sni = parser.get(section, "sni", fallback="").strip()
-                    if uuid or sni:
-                        self.node_configs.append({"uuid": uuid, "sni": sni})
+                    raw = parser.get(section, "sni", fallback="").strip()
+                    snis = list(dict.fromkeys([x.strip() for x in re.split(r"[,，;；\n]+", raw) if x.strip()]))
+                    if uuid or snis:
+                        self.node_configs.append({"account": number, "uuid": uuid, "snis": snis, "sni": snis[0] if snis else ""})
         except Exception as e:
             print("读取 config.ini 失败:", e)
-
-        if not self.node_configs:
-            self.node_configs = [{"uuid": "", "sni": ""}]
+        while len(self.node_configs) < 6:
+            self.node_configs.append({"account": len(self.node_configs)+1, "uuid": "", "snis": [], "sni": ""})
+        self.node_configs = self.node_configs[:6]
         self.config_index = 0
+        self._account_sni_pos = [0] * len(self.node_configs)
 
     def save_node_configs_file(self):
         parser = configparser.ConfigParser()
@@ -937,11 +938,15 @@ class NirSoftCFScanner:
             "ports": self.config_port_entry.get().strip(),
             "workers": self.config_worker_entry.get().strip(),
         }
-        for i, item in enumerate(self.node_configs, 1):
-            section = f"Node{i}"
+        for i, item in enumerate(self.node_configs[:6], 1):
+            section = f"Account{i}"
+            snis = item.get("snis", [])
+            if not isinstance(snis, list):
+                snis = [str(item.get("sni", "")).strip()] if item.get("sni") else []
+            snis = list(dict.fromkeys([str(x).strip() for x in snis if str(x).strip()]))
             parser[section] = {
                 "uuid": str(item.get("uuid", "")).strip(),
-                "sni": str(item.get("sni", "")).strip(),
+                "sni": ",".join(snis),
             }
         with open(self.config_file, "w", encoding="utf-8") as f:
             parser.write(f)
@@ -1115,12 +1120,12 @@ class NirSoftCFScanner:
                     if isinstance(direct, dict):
                         direct_uuid = str(direct.get("uuid") or "").strip()
                         direct_sni = str(direct.get("sni") or "").strip()
-                        if direct_uuid and direct_sni:
-                            info = {
-                                "uuid": direct_uuid,
-                                "sni": direct_sni,
-                                "worker_url": str(direct.get("workerUrl") or "").strip()
-                            }
+                        raw_snis = direct.get("snis") if isinstance(direct.get("snis"), list) else []
+                        snis = list(dict.fromkeys([str(x).strip() for x in raw_snis if str(x).strip()]))
+                        if direct_sni and direct_sni not in snis: snis.insert(0, direct_sni)
+                        if direct_uuid and snis:
+                            info = {"uuid": direct_uuid, "sni": snis[0], "snis": snis,
+                                    "worker_url": str(direct.get("workerUrl") or "").strip()}
 
                     # workers.dev 和外部自定义域名都可以作为 EdgeTunnel 入口。
                     # 不再依赖候选顺序：逐个尝试，任何一个能返回 /admin/nodeinfo
@@ -1155,8 +1160,9 @@ class NirSoftCFScanner:
                     for i, info, error in results:
                         if info is not None:
                             while len(self.node_configs) <= i:
-                                self.node_configs.append({"uuid": "", "sni": ""})
-                            self.node_configs[i] = {"uuid": info["uuid"], "sni": info["sni"]}
+                                self.node_configs.append({"account": len(self.node_configs)+1, "uuid": "", "snis": [], "sni": ""})
+                            snis = list(dict.fromkeys([str(x).strip() for x in (info.get("snis") or [info.get("sni", "")]) if str(x).strip()]))
+                            self.node_configs[i] = {"account": i + 1, "uuid": str(info.get("uuid", "")).strip(), "snis": snis, "sni": snis[0] if snis else ""}
 
                     success_count = sum(1 for _, info, _ in results if info is not None)
                     if success_count:
@@ -1191,7 +1197,7 @@ class NirSoftCFScanner:
             self.config_sni_uuid_entry.delete("1.0", "end")
             self.config_sni_uuid_entry.insert(
                 "1.0",
-                "格式：SNI地址 / UUID号，一行一个，例如：x.example.workers.dev / UUID"
+                "格式：账户1 | SNI1,SNI2 / UUID；一个账户可绑定多个域名/SNI"
             )
             self.config_sni_uuid_entry.tag_add("sni_uuid_placeholder", "1.0", "end")
             self.config_sni_uuid_entry.tag_configure("sni_uuid_placeholder", foreground="#aaaaaa")
@@ -1210,28 +1216,25 @@ class NirSoftCFScanner:
             self._set_sni_uuid_placeholder()
 
     def _config_read_current(self):
-        """从多行文本框读取所有节点配置，每行格式：SNI地址 / UUID号。"""
-        if not self.node_configs:
-            self.node_configs = [{"uuid": "", "sni": ""}]
-        if getattr(self, "_sni_uuid_placeholder_active", False):
-            raw = ""
-        else:
-            raw = self.config_sni_uuid_entry.get("1.0", "end-1c")
-        lines = raw.splitlines()
+        """读取六账户配置：账户1 | SNI1,SNI2 / UUID；一个账户可绑定多个 SNI。"""
+        raw = "" if getattr(self, "_sni_uuid_placeholder_active", False) else self.config_sni_uuid_entry.get("1.0", "end-1c")
         configs = []
-        for line in lines:
+        for index, line in enumerate(raw.splitlines()[:6], 1):
             value = line.strip()
-            if not value:
-                continue
-            if "/" in value:
-                sni, uuid = value.split("/", 1)
-                configs.append({"sni": sni.strip(), "uuid": uuid.strip()})
-            else:
-                configs.append({"sni": value, "uuid": ""})
-        if not configs:
-            configs = [{"uuid": "", "sni": ""}]
-        self.node_configs = configs
-        self.config_index = min(self.config_index, len(self.node_configs) - 1)
+            if not value: continue
+            left, uuid = value.split("/", 1) if "/" in value else (value, "")
+            account_no = index
+            if "|" in left:
+                account_text, left = left.split("|", 1)
+                m = re.search(r"\d+", account_text)
+                if m: account_no = max(1, min(6, int(m.group())))
+            snis = list(dict.fromkeys([x.strip() for x in re.split(r"[,，;；]+", left.strip()) if x.strip()]))
+            configs.append({"account": account_no, "uuid": uuid.strip(), "snis": snis, "sni": snis[0] if snis else ""})
+        while len(configs) < 6:
+            configs.append({"account": len(configs)+1, "uuid": "", "snis": [], "sni": ""})
+        self.node_configs = configs[:6]
+        self._account_sni_pos = [0] * len(self.node_configs)
+        self.config_index = min(self.config_index, len(self.node_configs)-1)
 
     def _config_show_current(self):
         if not self.node_configs:
@@ -1241,15 +1244,13 @@ class NirSoftCFScanner:
         self.config_sni_uuid_entry.tag_remove("sni_uuid_placeholder", "1.0", "end")
         self._sni_uuid_placeholder_active = False
         lines = []
-        for item in self.node_configs:
-            sni = str(item.get("sni", "")).strip()
+        for index, item in enumerate(self.node_configs[:6], 1):
+            snis = item.get("snis", [])
+            if not isinstance(snis, list):
+                snis = [str(item.get("sni", "")).strip()] if item.get("sni") else []
+            snis = [str(x).strip() for x in snis if str(x).strip()]
             uuid = str(item.get("uuid", "")).strip()
-            if sni and uuid:
-                lines.append(f"{sni} / {uuid}")
-            elif sni:
-                lines.append(sni)
-            elif uuid:
-                lines.append(uuid)
+            lines.append(f"账户{index} | {','.join(snis)}" + (f" / {uuid}" if uuid else ""))
         # 没有任何实际节点时显示浅色使用提示；有节点时始终保留最后一个空白行。
         if lines:
             self.config_sni_uuid_entry.insert("1.0", "\n".join(lines) + "\n")
@@ -1528,30 +1529,42 @@ class NirSoftCFScanner:
             return False
 
     def _next_cf_node_config(self):
-        """按调度顺序选择下一组 UUID/SNI；配置行1~6分别对应账户1~6。"""
-        if not self.node_configs:
-            return {"uuid": "", "sni": ""}
+        """按 6→5→4→3→2→1 选择账户，再在该账户的多个 SNI 中轮换。"""
+        if not self.node_configs: return {"uuid": "", "sni": ""}
         with self.cf_schedule_lock:
             order = list(self.cf_schedule_order) or [1]
             account = order[self.cf_schedule_pos % len(order)]
             self.cf_schedule_pos += 1
-        index = account - 1
-        if 0 <= index < len(self.node_configs):
-            node = self.node_configs[index]
-            return {"uuid": str(node.get("uuid", "")).strip(), "sni": str(node.get("sni", "")).strip()}
+            index = account - 1
+            if 0 <= index < len(self.node_configs):
+                node = self.node_configs[index]
+                uuid = str(node.get("uuid", "")).strip()
+                snis = node.get("snis", [])
+                if not isinstance(snis, list): snis = [str(node.get("sni", "")).strip()] if node.get("sni") else []
+                snis = [str(x).strip() for x in snis if str(x).strip()]
+                if snis:
+                    pos = self._account_sni_pos[index] % len(snis)
+                    self._account_sni_pos[index] += 1
+                    return {"uuid": uuid, "sni": snis[pos]}
+                return {"uuid": uuid, "sni": ""}
         return self.get_active_node_config()
 
     def get_active_node_config(self):
-        """返回当前选中的 UUID/SNI；不再回退到 test.json 的内置值。"""
-        if not self.node_configs:
-            return {"uuid": "", "sni": ""}
-        return self.node_configs[min(self.config_index, len(self.node_configs) - 1)]
+        """返回当前账户的 UUID 和第一个 SNI。"""
+        if not self.node_configs: return {"uuid": "", "sni": ""}
+        node = self.node_configs[min(self.config_index, len(self.node_configs)-1)]
+        snis = node.get("snis", [])
+        if not isinstance(snis, list): snis = [str(node.get("sni", "")).strip()] if node.get("sni") else []
+        return {"account": self.config_index+1, "uuid": str(node.get("uuid", "")).strip(),
+                "snis": snis, "sni": snis[0] if snis else ""}
 
     def apply_node_config(self, config, node_override=None):
         """把 UUID/SNI 应用到 Xray 配置；空值会清除模板中的内置值。"""
         node = node_override if node_override is not None else self.get_active_node_config()
         uuid = str(node.get("uuid", "")).strip()
-        sni = str(node.get("sni", "")).strip()
+        snis = node.get("snis", [])
+        if not isinstance(snis, list): snis = [str(node.get("sni", "")).strip()] if node.get("sni") else []
+        sni = str(node.get("sni", "")).strip() or (snis[0] if snis else "")
 
         outbounds = config.get("outbounds", [])
         if not outbounds:
@@ -3328,7 +3341,9 @@ class NirSoftCFScanner:
 
             node = self.node_configs[i] if i < len(self.node_configs) else {}
             uuid_var = tk.StringVar(value=str(node.get("uuid", "")).strip() or "—")
-            sni_var = tk.StringVar(value=str(node.get("sni", "")).strip() or "—")
+            snis = node.get("snis", [])
+            if not isinstance(snis, list): snis = [str(node.get("sni", "")).strip()] if node.get("sni") else []
+            sni_var = tk.StringVar(value=" | ".join([str(x).strip() for x in snis if str(x).strip()]) or "—")
 
             ttk.Label(table, textvariable=name_var, anchor="center", width=widths[0]).grid(
                 row=i + 1, column=0, padx=2, pady=3
