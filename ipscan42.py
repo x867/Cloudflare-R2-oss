@@ -3096,8 +3096,8 @@ class NirSoftCFScanner:
         table = ttk.Frame(frame)
         table.pack(fill="both", expand=True)
 
-        headers = ["账户", "今日请求", "今日剩余", "状态"]
-        widths = [12, 18, 18, 16]
+        headers = ["账户", "今日请求", "今日剩余", "状态", "UUID", "SNI"]
+        widths = [12, 18, 18, 16, 38, 34]
         for col, (title, width) in enumerate(zip(headers, widths)):
             ttk.Label(
                 table, text=title, anchor="center", width=width
@@ -3111,6 +3111,10 @@ class NirSoftCFScanner:
             limit_var = tk.StringVar(value="—")
             status_var = tk.StringVar(value="未连接")
 
+            node = self.node_configs[i] if i < len(self.node_configs) else {}
+            uuid_var = tk.StringVar(value=str(node.get("uuid", "")).strip() or "—")
+            sni_var = tk.StringVar(value=str(node.get("sni", "")).strip() or "—")
+
             ttk.Label(table, textvariable=name_var, anchor="center", width=widths[0]).grid(
                 row=i + 1, column=0, padx=2, pady=3
             )
@@ -3123,6 +3127,12 @@ class NirSoftCFScanner:
             ttk.Label(table, textvariable=status_var, anchor="center", width=widths[3]).grid(
                 row=i + 1, column=3, padx=2, pady=3
             )
+            ttk.Label(table, textvariable=uuid_var, anchor="center", width=widths[4]).grid(
+                row=i + 1, column=4, padx=2, pady=3
+            )
+            ttk.Label(table, textvariable=sni_var, anchor="center", width=widths[5]).grid(
+                row=i + 1, column=5, padx=2, pady=3
+            )
 
             self.cf_quota_rows.append({
                 "name": name_var,
@@ -3130,6 +3140,8 @@ class NirSoftCFScanner:
                 "remain": remain_var,
                 "limit": limit_var,
                 "status": status_var,
+                "uuid": uuid_var,
+                "sni": sni_var,
             })
 
         bottom = ttk.Frame(frame)
