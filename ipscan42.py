@@ -1039,9 +1039,13 @@ class NirSoftCFScanner:
             raise RuntimeError(str(data.get("error") or data.get("msg") or "Worker 信息读取失败"))
         uuid = str(data.get("uuid", "")).strip()
         sni = str(data.get("sni", "")).strip()
-        if not uuid or not sni:
-            raise RuntimeError("Worker 没有返回完整 UUID/SNI")
-        return {"uuid": uuid, "sni": sni}
+        if not uuid:
+            raise RuntimeError("Worker 没有返回 UUID")
+        # 保留 nodeinfo 的其它字段，账户6可能需要从内部 Worker 的返回数据中发现外部域名。
+        result = dict(data)
+        result["uuid"] = uuid
+        result["sni"] = sni
+        return result
 
     def auto_fetch_six_worker_configs(self):
         """只从账户1获取公共 UUID；账户1~6分别发现自己的 SNI/域名。"""
@@ -1186,10 +1190,20 @@ class NirSoftCFScanner:
                             ni = self._fetch_worker_nodeinfo(url, password)
                             candidate_sni = str(ni.get("sni") or "").strip()
                             candidate_sni = re.sub(r"^https?://", "", candidate_sni, flags=re.I).split("/", 1)[0].strip()
-                            # 账户6访问内部 workers.dev 后，继续读取 nodeinfo 中的外部 SNI 列表。
-                            if account == 6 and isinstance(ni.get("snis"), list):
+                            # 账户6可能通过内部 workers.dev 访问，但外部 SNI 保存在 nodeinfo 的其它字段中。
+                            if account == 6:
                                 external_snis = []
-                                for value in ni.get("snis"):
+                                values = []
+                                raw_snis = ni.get("snis")
+                                if isinstance(raw_snis, list):
+                                    values.extend(raw_snis)
+                                for key in ("sni", "hostname", "host", "domain", "domainName", "worker", "workerDomain"):
+                                    value = ni.get(key)
+                                    if isinstance(value, list):
+                                        values.extend(value)
+                                    elif value:
+                                        values.append(value)
+                                for value in values:
                                     value = re.sub(r"^https?://", "", str(value or "").strip(), flags=re.I).split("/", 1)[0].strip()
                                     if not value or value.lower().endswith(".workers.dev"):
                                         continue
