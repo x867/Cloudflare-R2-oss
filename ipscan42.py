@@ -3222,6 +3222,12 @@ class NirSoftCFScanner:
                 self.config_mode = False
                 self.config_readonly = False
                 self.tree.lift()
+                # CF 配置页覆盖 Treeview 时会把右侧滚动条压到下面；
+                # 返回主界面后重新提升滚动条，确保它立即可见。
+                try:
+                    self.tree_scrollbar.lift()
+                except Exception:
+                    pass
             except Exception:
                 pass
 
