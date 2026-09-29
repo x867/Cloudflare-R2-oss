@@ -1166,6 +1166,10 @@ class NirSoftCFScanner:
                                 value = str(candidate.get(key) or "").strip()
                                 if value:
                                     value = re.sub(r"^https?://", "", value, flags=re.I).split("/", 1)[0].strip()
+                                    # workers.dev 是 Worker 内部默认域名，不作为外部 SNI；
+                                    # 优先保留用户绑定的外部域名。
+                                    if value.lower().endswith(".workers.dev"):
+                                        continue
                                     if value and value not in direct_snis:
                                         direct_snis.append(value)
                             if direct_snis:
