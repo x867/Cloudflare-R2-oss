@@ -695,7 +695,8 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 	const rotationPercent = Number.isFinite(Number(cfg.rotationPercent))
 		? Math.min(100, Math.max(1, Number(cfg.rotationPercent))) : 10;
 
-	// 账户1是主账户；备用账户固定顺序为 6→5→4→3→2。
+	// 主账户1；备用账户固定轮换顺序：6 → 5 → 4 → 3 → 2。
+	// 平衡模式和放干模式都以这个顺序为基础，区别只在“何时退出账户”。
 	const cycle = [1, 6, 5, 4, 3, 2];
 
 	const enriched = accounts.map((item, index) => {
@@ -703,16 +704,14 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		const used = Math.max(0, Number(item.todayUsed) || 0);
 		const remaining = Math.max(0, Number(item.todayRemaining) || 0);
 
-		// 平衡模式：账户1保留 reserve1%，账户2~6保留 reserveOther%。
-		// 放干模式：账户1仍保留 reserve1%，账户2~6不设软件保留线，允许一直放到 CF 实际停止/拒绝。
+		// 账户1始终保留 reserve1%；平衡模式下账户2~6保留 reserveOther%。
+		// 放干模式下账户2~6不设软件保留线，允许一直使用到 Cloudflare 实际停止/拒绝。
 		const reservePercent = normalizedMode === 'drain'
 			? (index === 0 ? reserve1Percent : 0)
 			: (index === 0 ? reserve1Percent : reserveOtherPercent);
 		const reserve = Math.floor(limit * reservePercent / 100);
 		const usableRemaining = Math.max(0, remaining - reserve);
 		const usedRatio = limit > 0 ? used / limit : 1;
-
-		// 一个轮换周期最多推进 rotationPercent 的额度；实际切换仍以最新额度查询结果为准。
 		const rotationChunk = Math.max(1, Math.floor(limit * rotationPercent / 100));
 		const rotationTargetUsed = Math.min(
 			Math.max(0, limit - reserve),
@@ -741,9 +740,9 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 
 	if (normalizedMode === 'drain') {
 		// 放干模式：
-		// 1. 账户1先使用到保留10%（或自定义保留比例）；
+		// 1. 账户1先使用到保留线；
 		// 2. 然后严格 6→5→4→3→2 依次放干；
-		// 3. 账户2~6不再因为5%软件保留线提前退出，直到查询到余额为0。
+		// 3. 账户2~6不因5%软件保留线退出，直到额度实际耗尽/Cloudflare拒绝。
 		if (enriched[0].todayRemaining > enriched[0].reserve) {
 			selectedAccount = 1;
 		} else {
@@ -753,20 +752,14 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		}
 		if (selectedAccount) order = [selectedAccount];
 	} else {
-		// 平衡模式：余额越多的账户优先参与轮换。
-		// 账户1保留 reserve1%，账户2~6保留 reserveOther%，低于各自保留线后退出轮换。
-		// 同余额时仍按 1→6→5→4→3→2 作为稳定的次级顺序。
-		const eligible = cycle.filter(account => {
+		// 平衡模式：
+		// 账户1保留10%（可配置），账户2~6各保留5%（可配置）。
+		// 不再按“谁剩余最多”排序，避免某一个账户长期被优先消耗。
+		// 返回固定轮换队列，由扫描软件逐个启动 Xray 时平均轮换。
+		order = cycle.filter(account => {
 			const item = enriched[account - 1];
 			return item && item.todayRemaining > item.reserve;
 		});
-		order = eligible.sort((a, b) => {
-			const ra = enriched[a - 1]?.usableRemaining || 0;
-			const rb = enriched[b - 1]?.usableRemaining || 0;
-			return rb - ra;
-		});
-		// 返回按当前剩余额度从多到少排列的完整轮换队列；
-		// 扫描软件按该队列逐个使用 UUID/SNI，额度刷新后重新排序。
 		selectedAccount = order[0] || null;
 	}
 
