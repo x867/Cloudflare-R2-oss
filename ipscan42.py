@@ -1203,11 +1203,29 @@ class NirSoftCFScanner:
                             item["uuid"] = shared_uuid
 
                     success_count = sum(1 for _, info, _ in results if info is not None)
-                    # SNI 获取成功后立即写入文本框；不依赖 UUID 是否同时存在。
-                    self._config_show_current()
+
+                    # 自动获取结果直接写入 SNI 文本框，不经过当前行/配置页状态转换。
+                    # 这样获取到的 6 个域名会立即按账户 1→6 显示。
+                    display_lines = []
+                    for i in range(6):
+                        result_item = next((x for x in results if x[0] == i), None)
+                        info = result_item[1] if result_item else None
+                        snis = []
+                        if isinstance(info, dict):
+                            snis = [str(x).strip() for x in (info.get("snis") or []) if str(x).strip()]
+                        display_lines.append(",".join(dict.fromkeys(snis)))
+
+                    self.config_sni_uuid_entry.config(state="normal")
+                    self.config_sni_uuid_entry.delete("1.0", "end")
+                    self.config_sni_uuid_entry.tag_remove("sni_uuid_placeholder", "1.0", "end")
+                    self._sni_uuid_placeholder_active = False
+                    self.config_sni_uuid_entry.insert("1.0", "\n".join(display_lines) + "\n")
+                    self._config_read_current()
+
                     if shared_uuid:
                         self.save_node_configs_file()
                     self.config_index = min(self.config_index, len(self.node_configs) - 1)
+                    self._config_highlight_line()
 
                     # 不弹“一个账户成功”之类的干扰窗口；结果直接显示在 SNI 文本框。
                     # 只有存在失败账户时才提示，成功获取的域名无需额外弹窗。
