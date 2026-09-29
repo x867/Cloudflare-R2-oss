@@ -337,7 +337,7 @@ class NirSoftCFScanner:
         self.config_subnet_entry.bind("<FocusIn>", self._config_subnet_focus_in)
         self.config_subnet_entry.bind("<FocusOut>", self._config_subnet_focus_out)
 
-        # SNI / UUID 合并成一个可滚动的大文本框，一行一条：SNI地址 / UUID号
+        # SNI / UUID：文本框只显示六个 SNI/域名，公共 UUID 单独显示在最后一行
         cfg_label("SNI / UUID", 2, 0)
         cfg_text_frame = tk.Frame(cfg_form, bg="#f4f4f4")
         cfg_text_frame.grid(row=2, column=1, columnspan=3, sticky="nsew", pady=6)
@@ -1230,7 +1230,7 @@ class NirSoftCFScanner:
         threading.Thread(target=worker, daemon=True).start()
 
     def _set_sni_uuid_placeholder(self):
-        """UUID / SNI 文本框为空时显示浅色使用提示；提示文字不参与保存。"""
+        """SNI 文本框为空时显示浅色使用提示；提示文字不参与保存。"""
         try:
             if self.config_sni_uuid_entry.get("1.0", "end-1c").strip():
                 self._sni_uuid_placeholder_active = False
@@ -1238,7 +1238,7 @@ class NirSoftCFScanner:
             self.config_sni_uuid_entry.delete("1.0", "end")
             self.config_sni_uuid_entry.insert(
                 "1.0",
-                "格式：账户1 | SNI1,SNI2 / UUID；一个账户可绑定多个域名/SNI"
+                "一行一个 SNI/域名（按账户1→6顺序）；六个子账户共用账户1获取的 UUID"
             )
             self.config_sni_uuid_entry.tag_add("sni_uuid_placeholder", "1.0", "end")
             self.config_sni_uuid_entry.tag_configure("sni_uuid_placeholder", foreground="#aaaaaa")
@@ -1257,25 +1257,53 @@ class NirSoftCFScanner:
             self._set_sni_uuid_placeholder()
 
     def _config_read_current(self):
-        """读取六账户配置：账户1 | SNI1,SNI2 / UUID；一个账户可绑定多个 SNI。"""
+        """读取六个 SNI/域名；公共 UUID 只读取一次并应用到六个子账户。"""
         raw = "" if getattr(self, "_sni_uuid_placeholder_active", False) else self.config_sni_uuid_entry.get("1.0", "end-1c")
         configs = []
-        for index, line in enumerate(raw.splitlines()[:6], 1):
+        shared_uuid = ""
+        sni_lines = []
+
+        for line in raw.splitlines():
             value = line.strip()
-            if not value: continue
-            left, uuid = value.split("/", 1) if "/" in value else (value, "")
-            account_no = index
-            if "|" in left:
-                account_text, left = left.split("|", 1)
-                m = re.search(r"\d+", account_text)
-                if m: account_no = max(1, min(6, int(m.group())))
-            snis = list(dict.fromkeys([x.strip() for x in re.split(r"[,，;；]+", left.strip()) if x.strip()]))
-            configs.append({"account": account_no, "uuid": uuid.strip(), "snis": snis, "sni": snis[0] if snis else ""})
+            if not value:
+                continue
+            if value.startswith("公共UUID"):
+                if "/" in value:
+                    shared_uuid = value.split("/", 1)[1].strip()
+                elif ":" in value:
+                    shared_uuid = value.split(":", 1)[1].strip()
+                continue
+            sni_lines.append(value)
+
+        for index, value in enumerate(sni_lines[:6], 1):
+            # 兼容旧配置格式：如果用户手工保留了“账户N | ... / UUID”，仍能读取。
+            if "|" in value:
+                _, value = value.split("|", 1)
+            if "/" in value:
+                left, inline_uuid = value.split("/", 1)
+                value = left.strip()
+                if not shared_uuid:
+                    shared_uuid = inline_uuid.strip()
+
+            snis = list(dict.fromkeys([x.strip() for x in re.split(r"[,，;；]+", value) if x.strip()]))
+            configs.append({
+                "account": index,
+                "uuid": shared_uuid,
+                "snis": snis,
+                "sni": snis[0] if snis else ""
+            })
+
         while len(configs) < 6:
-            configs.append({"account": len(configs)+1, "uuid": "", "snis": [], "sni": ""})
+            configs.append({
+                "account": len(configs) + 1,
+                "uuid": shared_uuid,
+                "snis": [],
+                "sni": ""
+            })
+
         self.node_configs = configs[:6]
         self._account_sni_pos = [0] * len(self.node_configs)
-        self.config_index = min(self.config_index, len(self.node_configs)-1)
+        self.config_index = min(self.config_index, len(self.node_configs) - 1)
 
     def _config_show_current(self):
         if not self.node_configs:
@@ -1284,16 +1312,20 @@ class NirSoftCFScanner:
         self.config_sni_uuid_entry.delete("1.0", "end")
         self.config_sni_uuid_entry.tag_remove("sni_uuid_placeholder", "1.0", "end")
         self._sni_uuid_placeholder_active = False
+
         lines = []
-        for index, item in enumerate(self.node_configs[:6], 1):
+        for item in self.node_configs[:6]:
             snis = item.get("snis", [])
             if not isinstance(snis, list):
                 snis = [str(item.get("sni", "")).strip()] if item.get("sni") else []
             snis = [str(x).strip() for x in snis if str(x).strip()]
-            uuid = str(item.get("uuid", "")).strip()
-            lines.append(f"账户{index} | {','.join(snis)}" + (f" / {uuid}" if uuid else ""))
-        # 没有任何实际节点时显示浅色使用提示；有节点时始终保留最后一个空白行。
-        if lines:
+            lines.append(",".join(snis))
+
+        shared_uuid = str(self.node_configs[0].get("uuid", "")).strip() if self.node_configs else ""
+        if shared_uuid:
+            lines.append(f"公共UUID / {shared_uuid}")
+
+        if any(x.strip() for x in lines):
             self.config_sni_uuid_entry.insert("1.0", "\n".join(lines) + "\n")
         else:
             self._set_sni_uuid_placeholder()
