@@ -1226,6 +1226,18 @@ class NirSoftCFScanner:
                     if info and info.get("snis"):
                         results.append((account - 1, info, None))
                     else:
+                        if account == 6:
+                            # 调试账户6：保留后台原始发现信息，便于确认是否是后端没有返回 nodeinfo/candidates。
+                            debug_parts = []
+                            if isinstance(item.get("nodeinfo"), dict):
+                                debug_parts.append("nodeinfo=" + json.dumps(item.get("nodeinfo"), ensure_ascii=False))
+                            if "candidates" in item:
+                                debug_parts.append("candidates=" + json.dumps(item.get("candidates"), ensure_ascii=False))
+                            if item.get("error"):
+                                debug_parts.append("error=" + str(item.get("error")))
+                            if not debug_parts:
+                                debug_parts.append("raw=" + json.dumps(item, ensure_ascii=False))
+                            error = "账户6自动发现原始数据：\n" + "\n".join(debug_parts)
                         results.append((account - 1, None, error or "未找到可访问的 SNI/域名"))
 
             except Exception as e:
