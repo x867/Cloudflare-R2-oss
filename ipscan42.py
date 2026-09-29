@@ -3739,7 +3739,7 @@ class NirSoftCFScanner:
                     if results[i][4] is None:
                         remain_value = results[i][2]
                         if i + 1 == active_account and remain_value is not None and remain_value > 0:
-                            row["status"].set("🟢 大流量中")
+                            row["status"].set("大流量中")
                         elif remain_value is not None and remain_value <= 0:
                             row["status"].set("已到上限")
             if total_requests is None:
