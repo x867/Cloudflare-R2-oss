@@ -235,6 +235,8 @@ class NirSoftCFScanner:
             orient="vertical",
             command=self.tree.yview
         )
+        # 保存引用，返回主界面时确保滚动条重新显示在 Treeview 上层。
+        self.tree_scrollbar = scrollbar
 
         self.tree.configure(yscrollcommand=scrollbar.set)
 
@@ -1197,6 +1199,12 @@ class NirSoftCFScanner:
         self.config_mode = False
         self.config_readonly = False
         self.tree.lift()
+        # 配置页覆盖 Treeview 时会把滚动条压到下面；
+        # 返回后必须把滚动条重新提升到最上层，否则滚动条会消失。
+        try:
+            self.tree_scrollbar.lift()
+        except Exception:
+            pass
         self.config_button.config(text="扫描配置", command=self.open_node_config)
         try:
             self.quota_button.config(text="CF配置", command=self.open_cf_quota_manager)
