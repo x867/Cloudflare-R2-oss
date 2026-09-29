@@ -753,8 +753,9 @@ async function get6AccountWorkerNodeInfo(env) {
 				}
 			}
 
-			// Worker Domains API 明确返回 hostname + service。
-			// 只有 service 与账户内真实 Worker Script 对得上时，才优先认为这个域名属于该 Worker。
+			// Worker Domains API 返回的是用户绑定到 Worker 的外部自定义域名。
+			// 本项目六账户都已绑定外部域名，因此外部域名必须优先于 workers.dev。
+			// 先放 service 明确匹配的外部域名，再放其他外部域名，最后才是 workers.dev。
 			try {
 				const domains = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/domains', token, '账户' + (i + 1) + ' Worker 域名读取失败');
 				const domainItems = Array.isArray(domains?.result) ? domains.result : [];
@@ -774,9 +775,9 @@ async function get6AccountWorkerNodeInfo(env) {
 					if (candidate.serviceMatched) matchedDomains.push(candidate);
 					else unmatchedDomains.push(candidate);
 				}
-				// 先尝试 service 明确对应的域名，再尝试没有脚本映射的域名作为最后兜底。
-				candidates.unshift(...matchedDomains);
-				if (!matchedDomains.length) candidates.push(...unmatchedDomains);
+				// 外部域名始终排在 workers.dev 前面。
+				// 即使 service 没有成功映射，也保留该外部域名作为候选，避免漏掉真正的 EdgeTunnel Worker。
+			candidates.unshift(...matchedDomains, ...unmatchedDomains);
 			} catch (e) {
 				if (!domainError) domainError = e?.message || String(e);
 			}
