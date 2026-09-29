@@ -112,7 +112,15 @@ export default {
 					const headerOK = headerPassword === (typeof 管理员密码 === 'string' ? 管理员密码.replace(/[\r\n]/g, '') : 管理员密码);
 					// 管理客户端可使用密码请求头，浏览器原有Cookie登录仍然兼容。
 					if (!cookieOK && !headerOK) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
-					if (访问路径 === 'admin/cfaccountconfig') {// 六账户 Account ID / Token 配置页面
+					if (访问路径 === 'admin/nodeinfo') {// 当前 Worker 的 UUID / SNI 信息（仅管理员密码可访问）
+						if (request.method !== 'GET') return new Response('Method Not Allowed', { status: 405 });
+						return new Response(JSON.stringify({
+							success: true,
+							uuid: userID,
+							sni: host,
+							hosts
+						}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
+					} else if (访问路径 === 'admin/cfaccountconfig') {// 六账户 Account ID / Token 配置页面
 						if (request.method === 'GET') return new Response(await html六账户配置(env), { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-store' } });
 						if (request.method === 'POST') {
 							try {
