@@ -1046,18 +1046,39 @@ class NirSoftCFScanner:
         def worker():
             results = []
             try:
-                request = urllib.request.Request(
-                    backend_url.rstrip("/") + "/admin/get6workerinfo",
-                    method="GET",
-                    headers={
-                        "Accept": "application/json",
-                        "User-Agent": "CF-IP-Scanner/1.0",
-                        "X-Admin-Password": password,
-                    },
-                )
-                with urllib.request.urlopen(request, timeout=20) as response:
-                    body = response.read().decode("utf-8-sig", errors="replace")
-                    status = response.getcode()
+                last_error = None
+                body = ""
+                status = 0
+                for attempt in range(3):
+                    request = urllib.request.Request(
+                        backend_url.rstrip("/") + "/admin/get6workerinfo",
+                        method="GET",
+                        headers={
+                            "Accept": "application/json",
+                            "Accept-Encoding": "identity",
+                            "Connection": "close",
+                            "User-Agent": "CF-IP-Scanner/1.0",
+                            "X-Admin-Password": password,
+                        },
+                    )
+                    try:
+                        with urllib.request.urlopen(request, timeout=30) as response:
+                            chunks = []
+                            while True:
+                                chunk = response.read(65536)
+                                if not chunk:
+                                    break
+                                chunks.append(chunk)
+                            body = b"".join(chunks).decode("utf-8-sig", errors="replace")
+                            status = response.getcode()
+                        break
+                    except (http.client.IncompleteRead, urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                        last_error = e
+                        if attempt < 2:
+                            time.sleep(0.8 * (attempt + 1))
+                            continue
+                        raise RuntimeError(f"读取账户1 Worker 自动发现结果失败：{e}") from e
+
                 if status != 200:
                     raise RuntimeError(f"账户1 Worker 自动发现接口 HTTP {status}")
 
