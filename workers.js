@@ -732,6 +732,45 @@ async function get6AccountWorkerNodeInfo(env) {
 				scripts.map(script => String(script?.id || script?.name || '').trim()).filter(Boolean)
 			);
 
+			// 直接从 Cloudflare Worker 的版本设置读取 UUID 环境变量。
+			// UUID 如果是普通环境变量，会出现在 plain_text binding 的 text 中；
+			// 如果被设置成 Secret，则再通过 Secrets API 读取 UUID 的实际值。
+			const scriptUUIDs = new Map();
+			for (const name of scriptNames) {
+				try {
+					const settings = await fetchJSON(
+						API_BASE + encodeURIComponent(accountId) + '/workers/scripts/' + encodeURIComponent(name) + '/settings',
+						token,
+						'账户' + (i + 1) + ' Worker ' + name + ' 设置读取失败'
+					);
+					const bindings = Array.isArray(settings?.result?.bindings) ? settings.result.bindings : [];
+					const uuidBinding = bindings.find(binding =>
+						String(binding?.name || '').trim().toUpperCase() === 'UUID'
+					);
+					let uuid = '';
+					if (uuidBinding?.type === 'plain_text') {
+						uuid = String(uuidBinding?.text || '').trim();
+					} else if (uuidBinding?.type === 'json') {
+						const value = uuidBinding?.json;
+						uuid = typeof value === 'string' ? value.trim() : '';
+					} else if (uuidBinding?.type === 'secret_text') {
+						try {
+							const secret = await fetchJSON(
+								API_BASE + encodeURIComponent(accountId) + '/workers/scripts/' + encodeURIComponent(name) + '/secrets/' + encodeURIComponent(String(uuidBinding.name)),
+								token,
+								'账户' + (i + 1) + ' Worker ' + name + ' UUID Secret 读取失败'
+							);
+							uuid = String(secret?.result?.text || '').trim();
+						} catch (e) {
+							if (!domainError) domainError = e?.message || String(e);
+						}
+					}
+					if (uuid) scriptUUIDs.set(name, uuid);
+				} catch (e) {
+					if (!domainError) domainError = e?.message || String(e);
+				}
+			}
+
 			// 只有确认该 Worker 自己启用了 workers.dev，才生成 workers.dev 地址。
 			// Cloudflare 的 Worker URL 规则是：<Worker名称>.<账户子域>.workers.dev。
 			if (subdomain && scriptNames.size) {
@@ -791,40 +830,29 @@ async function get6AccountWorkerNodeInfo(env) {
 				unique.push(item);
 			}
 
-			// 发现地址后，由账户1 Worker 直接探测 /admin/nodeinfo。
-			// 这样扫描软件不需要再用账户1密码逐个登录账户2~6的 Worker。
-			// workers.dev 和外部域名都可以，哪个先返回有效 UUID/SNI 就采用哪个。
+			// UUID 已经直接从 Cloudflare Worker 设置中读取。
+			// 域名仍然沿用上面的发现结果：外部域名优先，没有则使用 workers.dev。
+			// 这样不再依赖访问 /admin/nodeinfo 才能取得 UUID。
 			let nodeinfo = null;
-			const probeErrors = [];
 			for (const candidate of unique.slice(0, 30)) {
-				try {
-					const probeUrl = String(candidate.url).replace(/\/+$/, '') + '/admin/nodeinfo';
-					const probe = await fetch(probeUrl, {
-						method: 'GET',
-						headers: {
-							'Accept': 'application/json',
-							'X-Admin-Password': String(env.管理员密码 || '').replace(/[\\r\\n]/g, '')
-						}
-					});
-					const probeText = await probe.text();
-					let probeData = {};
-					try { probeData = JSON.parse(probeText); } catch (e) {}
-					if (probe.ok && probeData?.success && probeData?.uuid && probeData?.sni) {
-						nodeinfo = {
-							uuid: String(probeData.uuid).trim(),
-							sni: String(probeData.sni).trim(),
-							workerUrl: String(candidate.url).trim(),
-							source: String(candidate.source || '').trim()
-						};
-						break;
-					}
-					const detail = probeData?.error || (probe.ok ? '返回数据不是有效 UUID/SNI JSON' : 'HTTP ' + probe.status);
-					probeErrors.push(String(candidate.url) + '：' + detail);
-				} catch (e) {
-					probeErrors.push(String(candidate.url) + '：' + (e?.message || String(e)));
+				const service = String(candidate?.service || '').trim();
+				const uuid = service && scriptUUIDs.has(service)
+					? scriptUUIDs.get(service)
+					: (scriptUUIDs.size === 1 ? [...scriptUUIDs.values()][0] : '');
+				if (uuid) {
+					nodeinfo = {
+						uuid,
+						sni: String(candidate.hostname || candidate.url || '').replace(/^https?:\/\//i, '').replace(/\/+$/, ''),
+						workerUrl: String(candidate.url || '').trim(),
+						source: String(candidate.source || '').trim()
+					};
+					break;
 				}
 			}
-
+			const probeErrors = [];
+			if (!nodeinfo) {
+				probeErrors.push('已找到 Worker 域名，但 Cloudflare API 未读取到 UUID 环境变量');
+			}
 			results.push({
 				account: i + 1,
 				success: !!nodeinfo || unique.length > 0,
