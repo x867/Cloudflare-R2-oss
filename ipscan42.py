@@ -1304,6 +1304,9 @@ class NirSoftCFScanner:
             value = line.strip()
             if not value:
                 continue
+            if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", value):
+                shared_uuid = value
+                continue
             if value.startswith("公共UUID"):
                 if "/" in value:
                     shared_uuid = value.split("/", 1)[1].strip()
