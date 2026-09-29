@@ -792,13 +792,47 @@ async function get6AccountWorkerNodeInfo(env) {
 				unique.push(item);
 			}
 
+			// 发现地址后，由账户1 Worker 直接探测 /admin/nodeinfo。
+			// 这样扫描软件不需要再用账户1密码逐个登录账户2~6的 Worker。
+			// workers.dev 和外部域名都可以，哪个先返回有效 UUID/SNI 就采用哪个。
+			let nodeinfo = null;
+			const probeErrors = [];
+			for (const candidate of unique.slice(0, 30)) {
+				try {
+					const probe = await fetch(String(candidate.url), {
+						method: 'GET',
+						headers: {
+							'Accept': 'application/json',
+							'X-Admin-Password': String(env.管理员密码 || '').replace(/[\\r\\n]/g, '')
+						}
+					});
+					const probeText = await probe.text();
+					let probeData = {};
+					try { probeData = JSON.parse(probeText); } catch (e) {}
+					if (probe.ok && probeData?.success && probeData?.uuid && probeData?.sni) {
+						nodeinfo = {
+							uuid: String(probeData.uuid).trim(),
+							sni: String(probeData.sni).trim(),
+							workerUrl: String(candidate.url).trim(),
+							source: String(candidate.source || '').trim()
+						};
+						break;
+					}
+					const detail = probeData?.error || (probe.ok ? '返回数据不是有效 UUID/SNI JSON' : 'HTTP ' + probe.status);
+					probeErrors.push(String(candidate.url) + '：' + detail);
+				} catch (e) {
+					probeErrors.push(String(candidate.url) + '：' + (e?.message || String(e)));
+				}
+			}
+
 			results.push({
 				account: i + 1,
-				success: unique.length > 0,
+				success: !!nodeinfo || unique.length > 0,
 				tokenStatus: tokenStatus || 'active',
 				scripts: [...scriptNames],
 				candidates: unique.slice(0, 30),
-				error: unique.length ? '' : (domainError || '未找到可用 Worker 域名')
+				nodeinfo,
+				error: nodeinfo ? '' : (probeErrors.join('；').slice(0, 1200) || (unique.length ? '已找到 Worker 域名，但无法读取 UUID/SNI' : (domainError || '未找到可用 Worker 域名')))
 			});
 		} catch (err) {
 			results.push({
