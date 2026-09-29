@@ -838,7 +838,7 @@ async function get6AccountWorkerNodeInfo(env) {
 				const service = String(candidate?.service || '').trim();
 				const uuid = service && scriptUUIDs.has(service)
 					? scriptUUIDs.get(service)
-					: (scriptUUIDs.size === 1 ? [...scriptUUIDs.values()][0] : '');
+					: (scriptUUIDs.size ? [...scriptUUIDs.values()][0] : '');
 				if (uuid) {
 					nodeinfo = {
 						uuid,
