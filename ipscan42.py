@@ -90,9 +90,9 @@ class NirSoftCFScanner:
         self.cf_quota_login_key = None
         self.cf_quota_refresh_after_id = None
         self.cf_quota_rows = []
-        self.cf_schedule_mode = str(self.cf_quota_accounts.get("schedule_mode", "drain")).lower()
-        if self.cf_schedule_mode not in ("balance", "drain"):
-            self.cf_schedule_mode = "balance"
+        # 账户轮换固定使用放干模式：6 → 5 → 4 → 3 → 2 → 1。
+        # 即使旧的 cf_quota_config.json 保存过“平衡模式”，启动后也自动迁移到本规则。
+        self.cf_schedule_mode = "drain"
         self.cf_reserve_account1 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_account1", 10) or 10)))
         self.cf_reserve_accounts2_6 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_accounts2_6", 3) or 3)))
         self.cf_schedule_order = [6, 5, 4, 3, 2, 1]
@@ -3249,7 +3249,7 @@ class NirSoftCFScanner:
                         config["schedule_mode"],
                         config["reserve_account1"],
                         config["reserve_accounts2_6"],
-                        10,
+                        3,
                     ),
                     daemon=True
                 ).start()
