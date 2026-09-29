@@ -28,7 +28,7 @@ CF_LOGIN_URL = CF_BASE_URL + "/login"
 CF_ADD_URL = CF_BASE_URL + "/admin/ADD.txt"
 CF_PASSWORD_FILE = "cf_upload_config.json"
 CF_QUOTA_FILE = "cf_quota_config.json"
-CF_QUOTA_REFRESH_SECONDS = 30
+CF_QUOTA_REFRESH_SECONDS = 5
 
 
 class NirSoftCFScanner:
@@ -90,12 +90,12 @@ class NirSoftCFScanner:
         self.cf_quota_login_key = None
         self.cf_quota_refresh_after_id = None
         self.cf_quota_rows = []
-        self.cf_schedule_mode = str(self.cf_quota_accounts.get("schedule_mode", "balance")).lower()
+        self.cf_schedule_mode = str(self.cf_quota_accounts.get("schedule_mode", "drain")).lower()
         if self.cf_schedule_mode not in ("balance", "drain"):
             self.cf_schedule_mode = "balance"
         self.cf_reserve_account1 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_account1", 10) or 10)))
-        self.cf_reserve_accounts2_6 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_accounts2_6", 5) or 5)))
-        self.cf_schedule_order = [1, 2, 3, 4, 5, 6]
+        self.cf_reserve_accounts2_6 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_accounts2_6", 3) or 3)))
+        self.cf_schedule_order = [6, 5, 4, 3, 2, 1]
         self.cf_schedule_pos = 0
         self.cf_schedule_lock = threading.Lock()
         self.load_node_configs()
@@ -1246,55 +1246,34 @@ class NirSoftCFScanner:
             messagebox.showerror("保存失败", f"无法保存配置：\n{e}")
 
     def _set_cf_schedule(self, data):
-        """接收 Worker 的调度决策；放干模式只使用当前选中账户，平衡模式按返回顺序轮换。"""
+        """根据六账户实时额度选择当前账户；严格按 6→5→4→3→2→1 放干。"""
         order = []
-        selected_account = None
-        schedule = data.get("schedule") if isinstance(data, dict) else None
-        if isinstance(schedule, dict):
-            try:
-                mode = str(schedule.get("mode", self.cf_schedule_mode)).lower()
-                if mode in ("balance", "drain"):
-                    self.cf_schedule_mode = mode
-                raw_selected = schedule.get("selectedAccount")
-                if str(raw_selected).isdigit() and 1 <= int(raw_selected) <= 6:
-                    selected_account = int(raw_selected)
-                returned_order = [
-                    int(x) for x in schedule.get("order", [])
-                    if str(x).isdigit() and 1 <= int(x) <= 6
-                ]
-                if self.cf_schedule_mode == "drain":
-                    # 放干模式：严格只跑当前账户，达到保留线后由 Worker 切换到下一个账户。
-                    order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
-                else:
-                    order = returned_order
-            except Exception:
-                order = []
-        if not order:
-            accounts = data.get("accounts", []) if isinstance(data, dict) else []
-            try:
-                enriched = []
-                for i in range(6):
-                    item = accounts[i] if i < len(accounts) else {}
-                    limit = max(0, int(item.get("todayLimit", 0) or 0))
-                    remain = max(0, int(item.get("todayRemaining", 0) or 0))
-                    reserve_pct = self.cf_reserve_account1 if i == 0 else self.cf_reserve_accounts2_6
-                    reserve = int(limit * reserve_pct / 100)
-                    enriched.append((i + 1, remain, reserve))
-                if self.cf_schedule_mode == "drain":
-                    eligible = [
-                        account for account, remain, reserve in enriched
-                        if remain > reserve
-                    ]
-                    order = [eligible[0]] if eligible else []
-                else:
-                    eligible = [account for account, remain, reserve in enriched if remain > reserve]
-                    if eligible:
-                        with self.cf_schedule_lock:
-                            pos = self.cf_schedule_pos % len(eligible)
-                            order = eligible[pos:] + eligible[:pos]
-                            self.cf_schedule_pos += 1
-            except Exception:
-                order = []
+        accounts = data.get("accounts", []) if isinstance(data, dict) else []
+
+        try:
+            enriched = []
+            for i in range(6):
+                item = accounts[i] if i < len(accounts) else {}
+                limit = max(0, int(item.get("todayLimit", 0) or 0))
+                remain = max(0, int(item.get("todayRemaining", 0) or 0))
+                reserve_pct = self.cf_reserve_account1 if i == 0 else self.cf_reserve_accounts2_6
+                reserve = int(limit * reserve_pct / 100)
+                enriched.append((i + 1, remain, reserve))
+
+            # 固定顺序：6 → 5 → 4 → 3 → 2 → 1。
+            # 当前账户剩余高于保留线就继续使用；否则寻找下一个账户。
+            fixed_order = [6, 5, 4, 3, 2, 1]
+            for account in fixed_order:
+                row = next((x for x in enriched if x[0] == account), None)
+                if row is None:
+                    continue
+                _, remain, reserve = row
+                if remain > reserve:
+                    order = [account]
+                    break
+        except Exception:
+            order = []
+
         if order:
             with self.cf_schedule_lock:
                 self.cf_schedule_order = order
@@ -3175,7 +3154,7 @@ class NirSoftCFScanner:
                     self.cf_schedule_mode,
                     self.cf_reserve_account1,
                     self.cf_reserve_accounts2_6,
-                    10,
+                    3,
                 ),
                 daemon=True
             ).start()
@@ -3253,7 +3232,7 @@ class NirSoftCFScanner:
                 "remember": bool(remember_var.get()),
                 "schedule_mode": self.cf_schedule_mode,
                 "reserve_account1": max(0, min(100, int(reserve1_var.get().strip() or 10))),
-                "reserve_accounts2_6": max(0, min(100, int(reserve26_var.get().strip() or 5))),
+                "reserve_accounts2_6": max(0, min(100, int(reserve26_var.get().strip() or 3))),
             }
             if not config["backend_url"]:
                 messagebox.showwarning("提示", "请填写额度后台地址。", parent=dialog)
