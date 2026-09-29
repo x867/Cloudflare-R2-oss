@@ -1321,10 +1321,7 @@ class NirSoftCFScanner:
             snis = [str(x).strip() for x in snis if str(x).strip()]
             lines.append(",".join(snis))
 
-        shared_uuid = str(self.node_configs[0].get("uuid", "")).strip() if self.node_configs else ""
-        if shared_uuid:
-            lines.append(f"公共UUID / {shared_uuid}")
-
+        # 公共 UUID 只在程序内部保存，不显示在 SNI 文本框中。
         if any(x.strip() for x in lines):
             self.config_sni_uuid_entry.insert("1.0", "\n".join(lines) + "\n")
         else:
