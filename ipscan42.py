@@ -1003,6 +1003,7 @@ class NirSoftCFScanner:
             with urllib.request.urlopen(request, timeout=12) as response:
                 body = response.read().decode("utf-8-sig", errors="replace")
                 status = response.getcode()
+                content_type = str(response.headers.get("Content-Type") or "").strip()
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8-sig", errors="replace").strip()[:180]
             raise RuntimeError(
@@ -1013,7 +1014,16 @@ class NirSoftCFScanner:
         try:
             data = json.loads(body or "{}")
         except Exception as e:
-            raise RuntimeError("Worker 返回的不是有效 JSON") from e
+            preview = re.sub(r"\s+", " ", body).strip()[:120]
+            if "text/html" in content_type.lower() or body.lstrip().lower().startswith("<!doctype") or body.lstrip().lower().startswith("<html"):
+                title_match = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
+                title = re.sub(r"\s+", " ", title_match.group(1)).strip()[:80] if title_match else ""
+                detail = f"返回 HTML" + (f"（{title}）" if title else "")
+            else:
+                detail = f"返回非 JSON" + (f"（Content-Type: {content_type}）" if content_type else "")
+            if preview and not title_match if False else False:
+                pass
+            raise RuntimeError(detail) from e
         if not data.get("success"):
             raise RuntimeError(str(data.get("error") or data.get("msg") or "Worker 信息读取失败"))
         uuid = str(data.get("uuid", "")).strip()
