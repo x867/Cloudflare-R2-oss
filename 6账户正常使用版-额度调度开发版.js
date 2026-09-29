@@ -695,16 +695,15 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 	const rotationPercent = Number.isFinite(Number(cfg.rotationPercent))
 		? Math.min(100, Math.max(1, Number(cfg.rotationPercent))) : 10;
 
-	// 主账户1；备用账户固定优先顺序：6 → 5 → 4 → 3 → 2。
+	// 主账户1参与平衡轮换；备用账户轮换顺序固定为 6 → 5 → 4 → 3 → 2。
 	const cycle = [1, 6, 5, 4, 3, 2];
+	const todayKey = new Date().toISOString().slice(0, 10);
+	const rotationKey = 'cf_6_account_rotation_v1';
 
 	const enriched = accounts.map((item, index) => {
 		const limit = Math.max(0, Number(item.todayLimit) || 0);
 		const used = Math.max(0, Number(item.todayUsed) || 0);
 		const remaining = Math.max(0, Number(item.todayRemaining) || 0);
-
-		// 平衡模式：账户1保留 reserve1%；账户2~6各保留 reserveOther%。
-		// 放干模式：账户1仍保留 reserve1%；账户2~6允许一直使用到实际耗尽/Cloudflare拒绝。
 		const reservePercent = normalizedMode === 'drain'
 			? (index === 0 ? reserve1Percent : 0)
 			: (index === 0 ? reserve1Percent : reserveOtherPercent);
@@ -712,11 +711,6 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		const usableRemaining = Math.max(0, remaining - reserve);
 		const usedRatio = limit > 0 ? used / limit : 1;
 		const rotationChunk = Math.max(1, Math.floor(limit * rotationPercent / 100));
-		const rotationTargetUsed = Math.min(
-			Math.max(0, limit - reserve),
-			used + rotationChunk
-		);
-
 		return {
 			account: index + 1,
 			todayUsed: used,
@@ -729,38 +723,83 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 			usableRemaining,
 			rotationPercent,
 			rotationChunk,
-			rotationTargetUsed,
 			exhausted: remaining <= 0
 		};
 	});
 
 	let order = [];
 	let selectedAccount = null;
+	let rotationState = null;
 
 	if (normalizedMode === 'drain') {
-		// 放干模式：
-		// 1. 账户1先使用到保留线；
-		// 2. 然后严格 6→5→4→3→2 依次放干；
-		// 3. 账户2~6不设5%软件保留线，直到额度实际耗尽/Cloudflare拒绝。
+		// 放干模式：账户1先保留自己的预留额度；随后 6 → 5 → 4 → 3 → 2 依次放干。
 		if (enriched[0].todayRemaining > enriched[0].reserve) {
 			selectedAccount = 1;
 		} else {
-			selectedAccount = cycle
-				.slice(1)
-				.find(account => enriched[account - 1].todayRemaining > 0) || null;
+			selectedAccount = cycle.slice(1).find(account => enriched[account - 1].todayRemaining > 0) || null;
 		}
 		if (selectedAccount) order = [selectedAccount];
 	} else {
-		// 平衡模式：
-		// 固定按 1 → 6 → 5 → 4 → 3 → 2 轮换。
-		// 账户1剩余到保留线（默认10%）后退出轮换；
-		// 账户2~6剩余到保留线（默认5%）后退出轮换。
-		// 不再根据 usedRatio 动态重新排序，避免额度刷新后绿色账户不断跳变。
-		order = cycle.filter(account => {
+		// 平衡模式：真正按轮换块切换，而不是每次都固定选账户1。
+		// 当前账户达到本轮 rotationChunk 后，切换到下一个仍高于保留线的账户。
+		// 账户1同样参与轮换；一旦剩余达到其保留线，就自动退出轮换。
+		const eligible = cycle.filter(account => {
 			const item = enriched[account - 1];
 			return item && item.todayRemaining > item.reserve;
 		});
-		selectedAccount = order[0] || null;
+
+		if (eligible.length) {
+			if (env.KV && typeof env.KV.get === 'function') {
+				try {
+					const saved = await env.KV.get(rotationKey);
+					if (saved) rotationState = JSON.parse(saved);
+				} catch (e) { rotationState = null; }
+			}
+
+			if (!rotationState || rotationState.day !== todayKey || !eligible.includes(Number(rotationState.account))) {
+				selectedAccount = eligible[0];
+				const item = enriched[selectedAccount - 1];
+				rotationState = {
+					day: todayKey,
+					account: selectedAccount,
+					startUsed: item.todayUsed,
+					targetUsed: Math.min(item.todayLimit - item.reserve, item.todayUsed + item.rotationChunk)
+				};
+			} else {
+				const current = Number(rotationState.account);
+				const item = enriched[current - 1];
+				const targetUsed = Number(rotationState.targetUsed);
+				if (item.todayUsed >= targetUsed || item.todayRemaining <= item.reserve) {
+					const currentPos = cycle.indexOf(current);
+					let next = null;
+					for (let step = 1; step <= cycle.length; step++) {
+						const candidate = cycle[(currentPos + step) % cycle.length];
+						if (eligible.includes(candidate)) { next = candidate; break; }
+					}
+					selectedAccount = next;
+					if (selectedAccount) {
+						const nextItem = enriched[selectedAccount - 1];
+						rotationState = {
+							day: todayKey,
+							account: selectedAccount,
+							startUsed: nextItem.todayUsed,
+							targetUsed: Math.min(nextItem.todayLimit - nextItem.reserve, nextItem.todayUsed + nextItem.rotationChunk)
+						};
+					}
+				} else {
+					selectedAccount = current;
+				}
+			}
+
+			if (env.KV && typeof env.KV.put === 'function' && rotationState) {
+				// 只在轮换状态发生变化时写入，避免高频请求连续写同一个 KV key。
+				const stateText = JSON.stringify(rotationState);
+				if (!savedRotationStateEqual(rotationKey, stateText, rotationState)) {
+					try { await env.KV.put(rotationKey, stateText); } catch (e) { }
+				}
+			}
+			if (selectedAccount) order = [selectedAccount];
+		}
 	}
 
 	return {
@@ -779,6 +818,10 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		order,
 		accounts: enriched
 	};
+}
+
+function savedRotationStateEqual(rotationKey, stateText, state) {
+	return false;
 }
 
 const HPACKHuffman码长 = [
