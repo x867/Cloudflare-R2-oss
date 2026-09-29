@@ -3096,8 +3096,8 @@ class NirSoftCFScanner:
         table = ttk.Frame(frame)
         table.pack(fill="both", expand=True)
 
-        headers = ["账户", "今日请求", "今日剩余", "额度", "状态"]
-        widths = [12, 18, 18, 15, 16]
+        headers = ["账户", "今日请求", "今日剩余", "状态"]
+        widths = [12, 18, 18, 16]
         for col, (title, width) in enumerate(zip(headers, widths)):
             ttk.Label(
                 table, text=title, anchor="center", width=width
@@ -3120,11 +3120,8 @@ class NirSoftCFScanner:
             ttk.Label(table, textvariable=remain_var, anchor="center", width=widths[2]).grid(
                 row=i + 1, column=2, padx=2, pady=3
             )
-            ttk.Label(table, textvariable=limit_var, anchor="center", width=widths[3]).grid(
+            ttk.Label(table, textvariable=status_var, anchor="center", width=widths[3]).grid(
                 row=i + 1, column=3, padx=2, pady=3
-            )
-            ttk.Label(table, textvariable=status_var, anchor="center", width=widths[4]).grid(
-                row=i + 1, column=4, padx=2, pady=3
             )
 
             self.cf_quota_rows.append({
