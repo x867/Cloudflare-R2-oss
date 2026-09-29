@@ -630,7 +630,7 @@ function 六账户默认额度(env) {
 }
 
 async function 读取六账户配置(env) {
-	const fromEnv = () => ({ accounts: Array.from({ length: 6 }, (_, i) => ({ id: String(env[`CF_ACCOUNT_${i + 1}_ID`] || '').trim(), token: String(env[`CF_ACCOUNT_${i + 1}_TOKEN`] || '').trim() })), limits: 六账户默认额度(env), scheduleMode: 'balance', reserve1Percent: 10, reserveOtherPercent: 5, rotationPercent: 10 });
+	const fromEnv = () => ({ accounts: Array.from({ length: 6 }, (_, i) => ({ id: String(env[`CF_ACCOUNT_${i + 1}_ID`] || '').trim(), token: String(env[`CF_ACCOUNT_${i + 1}_TOKEN`] || '').trim() })), limits: 六账户默认额度(env), scheduleMode: 'balance', reserve1Percent: 10, reserveOtherPercent: 3, rotationPercent: 10 });
 	if (!env.KV || typeof env.KV.get !== 'function') return fromEnv();
 	try {
 		const saved = await env.KV.get(六账户配置KV键);
@@ -691,7 +691,7 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 	const reserve1Percent = Number.isFinite(Number(cfg.reserve1Percent))
 		? Math.min(100, Math.max(0, Number(cfg.reserve1Percent))) : 10;
 	const reserveOtherPercent = Number.isFinite(Number(cfg.reserveOtherPercent))
-		? Math.min(100, Math.max(0, Number(cfg.reserveOtherPercent))) : 5;
+		? Math.min(100, Math.max(0, Number(cfg.reserveOtherPercent))) : 3;
 	const rotationPercent = Number.isFinite(Number(cfg.rotationPercent))
 		? Math.min(100, Math.max(1, Number(cfg.rotationPercent))) : 10;
 
