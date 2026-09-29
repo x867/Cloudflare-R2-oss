@@ -1107,21 +1107,31 @@ class NirSoftCFScanner:
                     candidates = item.get("candidates") or []
                     info = None
                     error = str(item.get("error") or "").strip()
+                    tried = []
 
+                    # workers.dev 和外部自定义域名都可以作为 EdgeTunnel 入口。
+                    # 不再依赖候选顺序：逐个尝试，任何一个能返回 /admin/nodeinfo
+                    # 的地址都算成功。这样即使第一个地址是 workers.dev，
+                    # 也会继续尝试后面的外部域名。
                     for candidate in candidates:
-                        url = str(candidate.get("url") or "").strip()
+                        if isinstance(candidate, dict):
+                            url = str(candidate.get("url") or candidate.get("hostname") or "").strip()
+                        else:
+                            url = str(candidate or "").strip()
                         if not url:
                             continue
                         try:
                             info = self._fetch_worker_nodeinfo(url, password)
-                            info["worker_url"] = url
+                            info["worker_url"] = self._normalize_worker_info_url(url)
                             break
                         except Exception as e:
-                            error = f"{url}: {e}"
+                            tried.append(f"{url}: {e}")
 
                     if info:
                         results.append((account - 1, info, None))
                     else:
+                        if tried:
+                            error = "；".join(tried[-6:])
                         results.append((account - 1, None, error or "未找到可访问的 EdgeTunnel Worker"))
             except Exception as e:
                 error = str(e)
