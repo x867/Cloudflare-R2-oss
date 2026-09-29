@@ -3646,7 +3646,6 @@ class NirSoftCFScanner:
             }
 
             self.cf_quota_refreshing = True
-            refresh_button.config(state="disabled")
 
             # 刷新时保留当前表格内容，不清空、不显示“读取中…”。
             # 新数据返回后直接覆盖对应数值。
@@ -3659,19 +3658,18 @@ class NirSoftCFScanner:
 
             threading.Thread(
                 target=self._refresh_cf_quota_worker,
-                args=(dialog, refresh_button, total_var, backend_url, username, password, progress_callback, login_status_var, login_status_label),
+                args=(dialog, total_var, backend_url, username, password, progress_callback, login_status_var, login_status_label, refresh),
                 daemon=True
             ).start()
 
-        refresh_button.config(command=refresh)
         save_button.config(command=save_config)
 
         # 打开后立即尝试读取一次；之后每 30 秒自动刷新。
         refresh()
 
     def _refresh_cf_quota_worker(
-        self, dialog, refresh_button, total_var,
-        backend_url, username, password, progress_callback=None, login_status_var=None, login_status_label=None
+        self, dialog, total_var,
+        backend_url, username, password, progress_callback=None, login_status_var=None, login_status_label=None, refresh_callback=None
     ):
         try:
             data = self._cf_quota_login_and_query(
@@ -3771,16 +3769,14 @@ class NirSoftCFScanner:
                 total_var.set("")
 
             self.cf_quota_refreshing = False
-            if refresh_button.winfo_exists():
-                refresh_button.config(state="normal")
 
             # 自动刷新：记录 after ID；关闭窗口时会明确取消，避免返回后又触发一次登录。
             if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog:
                 try:
                     self.cf_quota_refresh_after_id = dialog.after(
                         CF_QUOTA_REFRESH_SECONDS * 1000,
-                        lambda: refresh_button.invoke()
-                        if dialog.winfo_exists() and not self.cf_quota_refreshing and self.cf_quota_dialog is dialog
+                        lambda: refresh_callback()
+                        if dialog.winfo_exists() and not self.cf_quota_refreshing and self.cf_quota_dialog is dialog and refresh_callback is not None
                         else None
                     )
                 except Exception:
