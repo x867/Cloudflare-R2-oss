@@ -1022,36 +1022,20 @@ class NirSoftCFScanner:
         return {"uuid": uuid, "sni": sni}
 
     def auto_fetch_six_worker_configs(self):
-        """自动访问当前六条 Worker 地址，读取实际 UUID/SNI，并立即保存到 config.ini。"""
+        """通过账户1 Worker 的后台接口自动发现账户1~6的 Worker 地址，再读取实际 UUID/SNI。"""
         if getattr(self, "config_readonly", False):
             return
-        self._config_read_current()
-        current = list(self.node_configs)
-        backend_url = str(self.cf_quota_accounts.get("backend_url", "")).strip()
+
+        backend_url = self._normalize_worker_info_url(
+            str(self.cf_quota_accounts.get("backend_url", "")).strip()
+        )
         password = str(self.cf_quota_accounts.get("password", "") or "").strip()
 
-        if not password:
-            messagebox.showwarning(
-                "提示",
-                "自动获取需要 Worker 管理员密码。\n请在“CF配置”中勾选“保存登录信息”后再获取。"
-            )
+        if not backend_url:
+            messagebox.showwarning("无法自动获取", "没有配置账户1 Worker 地址。\n请先在“CF配置”中设置账户1的 Worker 地址。")
             return
-
-        urls = []
-        for i in range(6):
-            item = current[i] if i < len(current) else {}
-            sni = str(item.get("sni", "")).strip()
-            if i == 0 and not sni:
-                sni = backend_url
-            urls.append(sni)
-
-        missing = [str(i + 1) for i, url in enumerate(urls) if not str(url).strip()]
-        if missing:
-            messagebox.showwarning(
-                "无法自动获取",
-                "账户" + "、".join(missing) + "缺少 Worker 地址。\n"
-                "请先让对应账户的 Worker 地址出现在 UUID/SNI 文本框中。"
-            )
+        if not password:
+            messagebox.showwarning("提示", "自动获取需要 Worker 管理员密码。\n请在“CF配置”中勾选“保存登录信息”后再获取。")
             return
 
         try:
@@ -1061,12 +1045,57 @@ class NirSoftCFScanner:
 
         def worker():
             results = []
-            for i, url in enumerate(urls):
+            try:
+                request = urllib.request.Request(
+                    backend_url.rstrip("/") + "/admin/get6workerinfo",
+                    method="GET",
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": "CF-IP-Scanner/1.0",
+                        "X-Admin-Password": password,
+                    },
+                )
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    body = response.read().decode("utf-8-sig", errors="replace")
+                    status = response.getcode()
+                if status != 200:
+                    raise RuntimeError(f"账户1 Worker 自动发现接口 HTTP {status}")
+
                 try:
-                    info = self._fetch_worker_nodeinfo(url, password)
-                    results.append((i, info, None))
+                    data = json.loads(body or "{}")
                 except Exception as e:
-                    results.append((i, None, str(e)))
+                    raise RuntimeError("账户1 Worker 返回的不是有效 JSON") from e
+                if not data.get("success"):
+                    raise RuntimeError(str(data.get("error") or data.get("msg") or "六账户 Worker 自动发现失败"))
+
+                discovered = data.get("accounts") or []
+                if len(discovered) != 6:
+                    raise RuntimeError("Worker 返回的六账户发现结果不完整")
+
+                for item in discovered:
+                    account = int(item.get("account") or 0)
+                    candidates = item.get("candidates") or []
+                    info = None
+                    error = str(item.get("error") or "").strip()
+
+                    for candidate in candidates:
+                        url = str(candidate.get("url") or "").strip()
+                        if not url:
+                            continue
+                        try:
+                            info = self._fetch_worker_nodeinfo(url, password)
+                            info["worker_url"] = url
+                            break
+                        except Exception as e:
+                            error = f"{url}: {e}"
+
+                    if info:
+                        results.append((account - 1, info, None))
+                    else:
+                        results.append((account - 1, None, error or "未找到可访问的 EdgeTunnel Worker"))
+            except Exception as e:
+                error = str(e)
+                results = [(i, None, error) for i in range(6)]
 
             def apply():
                 try:
@@ -1074,10 +1103,7 @@ class NirSoftCFScanner:
                         if info is not None:
                             while len(self.node_configs) <= i:
                                 self.node_configs.append({"uuid": "", "sni": ""})
-                            self.node_configs[i] = {
-                                "uuid": info["uuid"],
-                                "sni": info["sni"],
-                            }
+                            self.node_configs[i] = {"uuid": info["uuid"], "sni": info["sni"]}
 
                     success_count = sum(1 for _, info, _ in results if info is not None)
                     if success_count:
@@ -1085,22 +1111,14 @@ class NirSoftCFScanner:
                         self.save_node_configs_file()
                         self.config_index = min(self.config_index, len(self.node_configs) - 1)
 
-                    failed = [
-                        f"账户{i + 1}：{error}"
-                        for i, info, error in results
-                        if info is None
-                    ]
+                    failed = [f"账户{i + 1}：{error}" for i, info, error in results if info is None]
                     if failed:
                         messagebox.showwarning(
                             "自动获取完成",
-                            f"已获取并保存 {success_count}/6 个账户的 UUID/SNI。\n\n"
-                            + "\n".join(failed)
+                            f"已获取并保存 {success_count}/6 个账户的 UUID/SNI。\n\n" + "\n".join(failed)
                         )
                     else:
-                        messagebox.showinfo(
-                            "自动获取完成",
-                            "六个账户的实际 UUID/SNI 已全部获取并自动保存。"
-                        )
+                        messagebox.showinfo("自动获取完成", "已自动发现六个账户的 Worker，并获取实际 UUID/SNI。\n结果已自动保存到扫描配置。")
                 finally:
                     try:
                         self.config_auto_fetch_button.config(state="normal")
