@@ -3480,7 +3480,8 @@ class NirSoftCFScanner:
             ttk.Label(table, textvariable=remain_var, anchor="center", width=widths[2]).grid(
                 row=i + 1, column=2, padx=2, pady=3
             )
-            ttk.Label(table, textvariable=status_var, anchor="center", width=widths[3]).grid(
+            status_label = ttk.Label(table, textvariable=status_var, anchor="center", width=widths[3])
+            status_label.grid(
                 row=i + 1, column=3, padx=2, pady=3
             )
             ttk.Label(table, textvariable=uuid_var, anchor="center", width=widths[4]).grid(
@@ -3496,6 +3497,7 @@ class NirSoftCFScanner:
                 "remain": remain_var,
                 "limit": limit_var,
                 "status": status_var,
+                "status_label": status_label,
                 "uuid": uuid_var,
                 "sni": sni_var,
             })
@@ -3740,8 +3742,21 @@ class NirSoftCFScanner:
                         remain_value = results[i][2]
                         if i + 1 == active_account and remain_value is not None and remain_value > 0:
                             row["status"].set("大流量中")
+                            try:
+                                row["status_label"].configure(foreground="#008000")
+                            except Exception:
+                                pass
                         elif remain_value is not None and remain_value <= 0:
                             row["status"].set("已到上限")
+                            try:
+                                row["status_label"].configure(foreground="#000000")
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                row["status_label"].configure(foreground="#000000")
+                            except Exception:
+                                pass
             if total_requests is None:
                 error_text = next((x[4] for x in results if x[4]), "未知错误")
                 error_lower = str(error_text).lower()
