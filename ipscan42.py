@@ -1175,8 +1175,6 @@ class NirSoftCFScanner:
                                 value = str(candidate.get(key) or "").strip()
                                 if value:
                                     value = re.sub(r"^https?://", "", value, flags=re.I).split("/", 1)[0].strip()
-                                    if value.lower().endswith(".workers.dev"):
-                                        continue
                                     if account == 1 and value.lower() == "cvx.ccwu.cc":
                                         continue
                                     if value and value not in direct_snis:
@@ -1191,30 +1189,6 @@ class NirSoftCFScanner:
                             ni = self._fetch_worker_nodeinfo(url, password)
                             candidate_sni = str(ni.get("sni") or "").strip()
                             candidate_sni = re.sub(r"^https?://", "", candidate_sni, flags=re.I).split("/", 1)[0].strip()
-                            # 账户6可能通过内部 workers.dev 访问，但外部 SNI 保存在 nodeinfo 的其它字段中。
-                            if account == 6:
-                                external_snis = []
-                                values = []
-                                raw_snis = ni.get("snis")
-                                if isinstance(raw_snis, list):
-                                    values.extend(raw_snis)
-                                for key in ("sni", "hostname", "host", "domain", "domainName", "worker", "workerDomain"):
-                                    value = ni.get(key)
-                                    if isinstance(value, list):
-                                        values.extend(value)
-                                    elif value:
-                                        values.append(value)
-                                for value in values:
-                                    value = re.sub(r"^https?://", "", str(value or "").strip(), flags=re.I).split("/", 1)[0].strip()
-                                    if not value or value.lower().endswith(".workers.dev"):
-                                        continue
-                                    if value not in external_snis:
-                                        external_snis.append(value)
-                                if external_snis:
-                                    info = {"snis": external_snis}
-                                    break
-                            if candidate_sni.lower().endswith(".workers.dev"):
-                                continue
                             if account == 1 and candidate_sni.lower() == "cvx.ccwu.cc":
                                 continue
                             if candidate_sni:
