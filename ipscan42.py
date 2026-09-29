@@ -1149,9 +1149,8 @@ class NirSoftCFScanner:
                     info = None
                     error = str(item.get("error") or "").strip()
 
-                    # 账户2~6和账户1一样，先按后台直接返回的 nodeinfo 获取。
-                    # 账户6不要因为 Worker 本身是 workers.dev 就放弃 nodeinfo；
-                    # 外部 SNI 如果已在 nodeinfo.snis 中，直接取出来。
+                    # 账户2~6完全按同一种方式直接读取 nodeinfo。
+                    # 只有账户1有多个域名，需要单独走 candidates；账户2~6各自只取自己的 SNI。
                     if account != 1:
                         direct = item.get("nodeinfo")
                         if isinstance(direct, dict):
@@ -1160,10 +1159,9 @@ class NirSoftCFScanner:
                             snis = list(dict.fromkeys([str(x).strip() for x in raw_snis if str(x).strip()]))
                             if direct_sni and direct_sni not in snis:
                                 snis.insert(0, direct_sni)
-                            if account == 6:
-                                snis = [x for x in snis if not x.lower().endswith(".workers.dev")]
                             if snis:
                                 info = {"snis": snis}
+
 
                     # 六个账户统一通过 candidates 寻找自己的外部 SNI/域名。
                     # 账户1的 cvx.ccwu.cc 是邮件转发 Worker，不属于 EdgeTunnel SNI；
