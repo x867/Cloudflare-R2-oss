@@ -660,6 +660,61 @@ async function html六账户配置(env) {
 	return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>六账户额度配置</title><style>body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f5f6f8;margin:0;padding:24px;color:#222}.box{max-width:900px;margin:auto;background:#fff;border-radius:14px;padding:24px;box-shadow:0 4px 18px rgba(0,0,0,.08)}h2{margin:0 0 8px}.tip{color:#666;font-size:14px;margin-bottom:18px}.row{display:grid;grid-template-columns:90px 1fr 1fr;gap:10px;margin:10px 0;align-items:center}.title{font-weight:700}input{box-sizing:border-box;width:100%;padding:10px 12px;border:1px solid #d5d9e0;border-radius:8px;font-size:14px}.limit{margin-top:18px}.actions{display:flex;gap:10px;margin-top:20px}button,a{border:0;border-radius:8px;padding:10px 18px;text-decoration:none;cursor:pointer;font-size:14px}button{background:#2563eb;color:#fff}.back{background:#e5e7eb;color:#222}#msg{margin-top:14px;font-weight:600}@media(max-width:700px){.row{grid-template-columns:1fr}.title{margin-top:8px}}</style></head><body><div class="box"><h2>账户1 · 六账户额度配置</h2><div class="tip">直接配置账户1～6的 Cloudflare Account ID 和 Analytics Token。Token 不会在页面回显。</div>${rows}<div class="limit"><label>每日额度（账户1～6，用逗号分隔）</label><input id="limits" value="${cfg.limits.join(',')}"></div><div style="margin-top:18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><label style="font-weight:700">保留比例</label><label>账户1：<input id="reserve1Percent" type="number" min="0" max="100" step="0.1" value="${cfg.reserve1Percent ?? 10}" style="width:90px">%</label><label>账户2~6：<input id="reserveOtherPercent" type="number" min="0" max="100" step="0.1" value="${cfg.reserveOtherPercent ?? 5}" style="width:90px">%</label></div><div style="margin-top:18px;display:flex;align-items:center;gap:10px"><label style="font-weight:700">轮换比例</label><input id="rotationPercent" type="number" min="1" max="100" step="1" value="${cfg.rotationPercent ?? 10}" style="width:90px">% <span style="color:#666">达到本账户这一比例后轮换到下一个账户，例如 10% / 20%</span></div><div style="margin-top:18px;display:flex;align-items:center;gap:10px"><label style="font-weight:700">调度模式</label><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="drainMode" type="checkbox" ${cfg.scheduleMode === 'drain' ? 'checked' : ''} style="width:auto"> 放干模式</label><span id="modeText" style="color:#666">未勾选：平衡模式</span></div><div class="actions"><button onclick="saveCfg()">保存全部账户</button><a class="back" href="/admin">返回管理后台</a></div><div id="msg"></div></div><script>const drainMode=document.getElementById('drainMode'),modeText=document.getElementById('modeText');function updateModeText(){modeText.textContent=drainMode.checked?'已勾选：放干模式':'未勾选：平衡模式'}drainMode.addEventListener('change',updateModeText);updateModeText();async function saveCfg(){const msg=document.getElementById('msg');msg.textContent='正在保存…';const accounts=[];for(let i=1;i<=6;i++)accounts.push({id:document.getElementById('id'+i).value.trim(),token:document.getElementById('token'+i).value});try{const r=await fetch(location.pathname,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({accounts,limits:document.getElementById('limits').value.trim(),scheduleMode:document.getElementById('drainMode').checked?'drain':'balance',reserve1Percent:document.getElementById('reserve1Percent').value,reserveOtherPercent:document.getElementById('reserveOtherPercent').value,rotationPercent:document.getElementById('rotationPercent').value})});const responseText=await r.text();let d=null;try{d=JSON.parse(responseText)}catch(_){ }if(!d){const detail=responseText.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim().slice(0,240);if(r.status===401||r.status===403||/登录|login|密码/i.test(detail)){msg.textContent='保存失败：登录状态已失效，请重新登录管理后台后再保存'}else{msg.textContent='保存失败：Worker 返回 HTTP '+r.status+'，不是 JSON'+(detail?'：'+detail:'')}return}msg.textContent=d.success?'保存成功 ✓':'保存失败：'+(d.error||d.msg||'未知错误')}catch(e){msg.textContent='保存失败：'+e.message}}</script></body></html>`;
 }
 
+async function get6AccountWorkerNodeInfo(env) {
+	const config = await 读取六账户配置(env);
+	if (!Array.isArray(config.accounts) || config.accounts.length !== 6) throw new Error('六账户配置不完整');
+	const API_BASE = 'https://api.cloudflare.com/client/v4/accounts/';
+	const fetchJSON = async (url, token, label) => {
+		const response = await fetch(url, {
+			method: 'GET',
+			headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' }
+		});
+		const text = await response.text();
+		let data = {};
+		try { data = JSON.parse(text); } catch (e) {}
+		if (!response.ok || data?.success === false) {
+			const detail = data?.errors?.[0]?.message || data?.message || text.slice(0, 240);
+			throw new Error(label + ' HTTP ' + response.status + (detail ? '：' + detail : ''));
+		}
+		return data;
+	};
+	const results = [];
+	for (let i = 0; i < 6; i++) {
+		const account = config.accounts[i] || {};
+		const accountId = String(account.id || '').trim();
+		const token = String(account.token || '').trim();
+		if (!accountId || !token) {
+			results.push({ account: i + 1, success: false, error: 'Account ID 或 Token 未配置', candidates: [] });
+			continue;
+		}
+		try {
+			const candidates = [];
+			// 优先读取已绑定的自定义 Worker 域名。
+			const domains = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/domains', token, '账户' + (i + 1) + ' Worker 域名读取失败');
+			for (const item of (Array.isArray(domains?.result) ? domains.result : [])) {
+				const hostname = String(item?.hostname || '').trim();
+				if (hostname) candidates.push({ url: 'https://' + hostname, hostname, source: 'workers-domain', service: String(item?.service || '') });
+			}
+			// 如果没有自定义域名，再尝试 workers.dev。
+			if (!candidates.length) {
+				const subdomain = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/subdomain', token, '账户' + (i + 1) + ' Workers 子域名读取失败');
+				const sub = String(subdomain?.result?.subdomain || '').trim();
+				if (sub) {
+					const scripts = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/scripts', token, '账户' + (i + 1) + ' Worker 列表读取失败');
+					for (const script of (Array.isArray(scripts?.result) ? scripts.result : [])) {
+						const name = String(script?.id || '').trim();
+						if (name) candidates.push({ url: 'https://' + name + '.' + sub + '.workers.dev', hostname: name + '.' + sub + '.workers.dev', source: 'workers-dev', service: name });
+					}
+				}
+			}
+			results.push({ account: i + 1, success: candidates.length > 0, candidates: candidates.slice(0, 20), error: candidates.length ? '' : '未找到可用 Worker 域名' });
+		} catch (err) {
+			results.push({ account: i + 1, success: false, candidates: [], error: err?.message || String(err) });
+		}
+	}
+	return { success: true, accountCount: 6, accounts: results };
+}
+
 async function get6AccountWorkerUsage(env) {
 	const config = await 读取六账户配置(env);
 	const accounts = config.accounts.map(item => item.id);
