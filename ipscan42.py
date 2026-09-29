@@ -98,6 +98,7 @@ class NirSoftCFScanner:
         self.cf_reserve_accounts2_6 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_accounts2_6", 3) or 3)))
         self.cf_schedule_order = [6, 5, 4, 3, 2, 1]
         self.cf_schedule_pos = 0
+        self.cf_current_account = 6
         self.cf_schedule_lock = threading.Lock()
         self.load_node_configs()
 
@@ -1578,38 +1579,48 @@ class NirSoftCFScanner:
             messagebox.showerror("保存失败", f"无法保存配置：\n{e}")
 
     def _set_cf_schedule(self, data):
-        """根据六账户实时额度选择当前账户；严格按 6→5→4→3→2→1 放干。"""
-        order = []
+        """根据实时额度锁定当前大流量账户；耗尽后严格按 6→5→4→3→2→1 切换。"""
         accounts = data.get("accounts", []) if isinstance(data, dict) else []
+        fixed_order = [6, 5, 4, 3, 2, 1]
+        available = {}
 
         try:
-            enriched = []
-            for i in range(6):
+            for account in fixed_order:
+                i = account - 1
                 item = accounts[i] if i < len(accounts) else {}
                 limit = max(0, int(item.get("todayLimit", 0) or 0))
                 remain = max(0, int(item.get("todayRemaining", 0) or 0))
-                reserve_pct = self.cf_reserve_account1 if i == 0 else self.cf_reserve_accounts2_6
+                reserve_pct = self.cf_reserve_account1 if account == 1 else self.cf_reserve_accounts2_6
                 reserve = int(limit * reserve_pct / 100)
-                enriched.append((i + 1, remain, reserve))
-
-            # 固定顺序：6 → 5 → 4 → 3 → 2 → 1。
-            # 当前账户剩余高于保留线就继续使用；否则寻找下一个账户。
-            fixed_order = [6, 5, 4, 3, 2, 1]
-            for account in fixed_order:
-                row = next((x for x in enriched if x[0] == account), None)
-                if row is None:
-                    continue
-                _, remain, reserve = row
-                if remain > reserve:
-                    order = [account]
-                    break
+                available[account] = (remain, reserve)
         except Exception:
-            order = []
+            return
 
-        if order:
-            with self.cf_schedule_lock:
-                self.cf_schedule_order = order
-                self.cf_schedule_pos = 0
+        with self.cf_schedule_lock:
+            current = int(getattr(self, "cf_current_account", 6) or 6)
+            if current not in fixed_order:
+                current = 6
+
+            # 当前账户还有额度：继续让它承担大流量，不每个请求轮换。
+            remain, reserve = available.get(current, (0, 0))
+            if remain > reserve:
+                self.cf_current_account = current
+            else:
+                # 当前账户到保留线/耗尽后，才向后切换。
+                start = fixed_order.index(current)
+                next_account = None
+                for offset in range(1, len(fixed_order) + 1):
+                    candidate = fixed_order[(start + offset) % len(fixed_order)]
+                    candidate_remain, candidate_reserve = available.get(candidate, (0, 0))
+                    if candidate_remain > candidate_reserve:
+                        next_account = candidate
+                        break
+                if next_account is not None:
+                    self.cf_current_account = next_account
+
+            # order 的第一项就是“当前大流量账户”，后续不参与逐请求轮换。
+            self.cf_schedule_order = [self.cf_current_account]
+            self.cf_schedule_pos = 0
 
     def _sync_cf_schedule_to_worker(self, backend_url, password, mode, reserve1, reserve26, rotation_percent):
         """把软件里的调度设置同步到账户1 Worker；失败只记录日志，不影响扫描。"""
@@ -1645,12 +1656,13 @@ class NirSoftCFScanner:
             return False
 
     def _next_cf_node_config(self):
-        """按 6→5→4→3→2→1 选择账户，再在该账户的多个 SNI 中轮换。"""
+        """使用当前大流量账户；只有额度刷新发现耗尽时才切换到下一个账户。"""
         if not self.node_configs: return {"uuid": "", "sni": ""}
         with self.cf_schedule_lock:
-            order = list(self.cf_schedule_order) or [1]
-            account = order[self.cf_schedule_pos % len(order)]
-            self.cf_schedule_pos += 1
+            order = list(self.cf_schedule_order) or [6, 5, 4, 3, 2, 1]
+            account = int(getattr(self, "cf_current_account", order[0]) or order[0])
+            if account not in order:
+                account = order[0]
             index = account - 1
             if 0 <= index < len(self.node_configs):
                 node = self.node_configs[index]
@@ -3720,6 +3732,16 @@ class NirSoftCFScanner:
 
             if total_requests is not None:
                 self._set_cf_schedule(getattr(self, "_last_cf_quota_data", {}))
+                # 当前真正承担大流量的账户用醒目标识显示；额度耗尽后标识会自动跳到下一个账户。
+                with self.cf_schedule_lock:
+                    active_account = int(getattr(self, "cf_current_account", 6) or 6)
+                for i, row in enumerate(self.cf_quota_rows):
+                    if results[i][4] is None:
+                        remain_value = results[i][2]
+                        if i + 1 == active_account and remain_value is not None and remain_value > 0:
+                            row["status"].set("🟢 大流量中")
+                        elif remain_value is not None and remain_value <= 0:
+                            row["status"].set("已到上限")
             if total_requests is None:
                 error_text = next((x[4] for x in results if x[4]), "未知错误")
                 error_lower = str(error_text).lower()
