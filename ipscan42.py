@@ -1145,18 +1145,22 @@ class NirSoftCFScanner:
                     info = None
                     error = str(item.get("error") or "").strip()
 
-                    direct = item.get("nodeinfo")
-                    if isinstance(direct, dict):
-                        raw_snis = direct.get("snis") if isinstance(direct.get("snis"), list) else []
-                        direct_sni = str(direct.get("sni") or "").strip()
-                        snis = list(dict.fromkeys([str(x).strip() for x in raw_snis if str(x).strip()]))
-                        if direct_sni and direct_sni not in snis:
-                            snis.insert(0, direct_sni)
-                        if snis:
-                            info = {"snis": snis}
+                    # 账户2~5可以直接使用 nodeinfo；账户1有多个域名、账户6有内部 workers.dev，
+                    # 因此账户1和账户6与2~5一样，优先走 candidates 发现流程。
+                    if account not in (1, 6):
+                        direct = item.get("nodeinfo")
+                        if isinstance(direct, dict):
+                            raw_snis = direct.get("snis") if isinstance(direct.get("snis"), list) else []
+                            direct_sni = str(direct.get("sni") or "").strip()
+                            snis = list(dict.fromkeys([str(x).strip() for x in raw_snis if str(x).strip()]))
+                            if direct_sni and direct_sni not in snis:
+                                snis.insert(0, direct_sni)
+                            if snis:
+                                info = {"snis": snis}
 
-                    # 优先直接使用后台返回的 hostname/domain；这就是该账户的 SNI。
-                    # 不再要求再次访问 /admin/nodeinfo 才允许写入文本框。
+                    # 六个账户统一通过 candidates 寻找自己的外部 SNI/域名。
+                    # 账户1的 cvx.ccwu.cc 是邮件转发 Worker，不属于 EdgeTunnel SNI；
+                    # 账户6的 *.workers.dev 是内部 Worker 域名，过滤后继续找其它候选。
                     for candidate in candidates:
                         if info and info.get("snis"):
                             break
@@ -1166,9 +1170,9 @@ class NirSoftCFScanner:
                                 value = str(candidate.get(key) or "").strip()
                                 if value:
                                     value = re.sub(r"^https?://", "", value, flags=re.I).split("/", 1)[0].strip()
-                                    # workers.dev 是 Worker 内部默认域名，不作为外部 SNI；
-                                    # 优先保留用户绑定的外部域名。
                                     if value.lower().endswith(".workers.dev"):
+                                        continue
+                                    if account == 1 and value.lower() == "cvx.ccwu.cc":
                                         continue
                                     if value and value not in direct_snis:
                                         direct_snis.append(value)
@@ -1181,6 +1185,11 @@ class NirSoftCFScanner:
                         try:
                             ni = self._fetch_worker_nodeinfo(url, password)
                             candidate_sni = str(ni.get("sni") or "").strip()
+                            candidate_sni = re.sub(r"^https?://", "", candidate_sni, flags=re.I).split("/", 1)[0].strip()
+                            if candidate_sni.lower().endswith(".workers.dev"):
+                                continue
+                            if account == 1 and candidate_sni.lower() == "cvx.ccwu.cc":
+                                continue
                             if candidate_sni:
                                 info = {"snis": [candidate_sni]}
                                 break
