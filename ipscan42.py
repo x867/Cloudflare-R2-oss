@@ -91,14 +91,9 @@ class NirSoftCFScanner:
             self.cf_schedule_mode = "balance"
         self.cf_reserve_account1 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_account1", 10) or 10)))
         self.cf_reserve_accounts2_6 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_accounts2_6", 5) or 5)))
-        self.cf_rotation_percent = max(1, min(100, int(self.cf_quota_accounts.get("rotation_percent", 10) or 10)))
-        # 默认从账户6开始轮换，账户1只在仍高于保留线时参与\n        self.cf_schedule_order = [6, 5, 4, 3, 2, 1]
+        self.cf_schedule_order = [1, 2, 3, 4, 5, 6]
         self.cf_schedule_pos = 0
         self.cf_schedule_lock = threading.Lock()
-        self.cf_schedule_poll_stop = threading.Event()
-        self.cf_schedule_poll_thread = None
-        self.cf_runtime_password = str(self.cf_quota_accounts.get("password", ""))
-        self.cf_quota_active_account = None
         self.load_node_configs()
 
         # 表头排序状态
@@ -456,7 +451,6 @@ class NirSoftCFScanner:
         if not self.running:
             return
         self.scan_stop_event.set()
-        self.stop_cf_schedule_poller()
         self.running = False
         self.scan_elapsed = (
             time.monotonic() - self.scan_start_time
@@ -570,7 +564,6 @@ class NirSoftCFScanner:
         """扫描全部完成：清除断点，下一次开始重新扫描。"""
         self.running = False
         self.scan_stop_event.set()
-        self.stop_cf_schedule_poller()
         self.xray_stop_event.set()
         self.force_stop_all_xray()
         self.force_stop_xray()
@@ -819,7 +812,6 @@ class NirSoftCFScanner:
 
         self.scan_stop_event.clear()
         self.xray_stop_event.clear()
-        self.start_cf_schedule_poller()
 
         if not self.resume_available:
             for item in self.tree.get_children():
@@ -1232,12 +1224,10 @@ class NirSoftCFScanner:
                     if str(x).isdigit() and 1 <= int(x) <= 6
                 ]
                 if self.cf_schedule_mode == "drain":
-                    # 放干模式严格只使用当前账户，直到它进入保留线/CF拒绝。
+                    # 放干模式：严格只跑当前账户，达到保留线后由 Worker 切换到下一个账户。
                     order = [selected_account] if selected_account else (returned_order[:1] if returned_order else [])
                 else:
-                    # 平衡模式：Worker 返回的 order 已按当前可用额度排序。
-                    # 保留完整队列，由 _next_cf_node_config 在每个新 Xray 实例间轮换。
-                    order = returned_order or ([selected_account] if selected_account else [])
+                    order = returned_order
             except Exception:
                 order = []
         if not order:
@@ -1258,31 +1248,18 @@ class NirSoftCFScanner:
                     ]
                     order = [eligible[0]] if eligible else []
                 else:
-                    # 回退时也保持与 Worker 一致的固定轮换顺序：
-                    # 账户1 → 6 → 5 → 4 → 3 → 2。
-                    # 只要账户高于自己的保留线，就参与轮换。
-                    cycle = [6, 5, 4, 3, 2, 1]
-                    order = [
-                        account for account in cycle
-                        for item_account, remain, reserve in enriched
-                        if item_account == account and remain > reserve
-                    ]
+                    eligible = [account for account, remain, reserve in enriched if remain > reserve]
+                    if eligible:
+                        with self.cf_schedule_lock:
+                            pos = self.cf_schedule_pos % len(eligible)
+                            order = eligible[pos:] + eligible[:pos]
+                            self.cf_schedule_pos += 1
             except Exception:
                 order = []
         if order:
             with self.cf_schedule_lock:
-                old_order = list(self.cf_schedule_order)
-                old_pos = self.cf_schedule_pos
                 self.cf_schedule_order = order
-                if self.cf_schedule_mode == "balance" and old_order:
-                    # 刷新额度时尽量保持当前轮换位置；如果当前账户已退出，则从新队列头开始。
-                    current_account = old_order[old_pos % len(old_order)] if old_pos < len(old_order) else None
-                    if current_account in order:
-                        self.cf_schedule_pos = order.index(current_account)
-                    else:
-                        self.cf_schedule_pos = 0
-                else:
-                    self.cf_schedule_pos = 0
+                self.cf_schedule_pos = 0
 
     def _sync_cf_schedule_to_worker(self, backend_url, password, mode, reserve1, reserve26, rotation_percent):
         """把软件里的调度设置同步到账户1 Worker；失败只记录日志，不影响扫描。"""
@@ -1317,110 +1294,18 @@ class NirSoftCFScanner:
             print("CF调度设置同步失败:", e)
             return False
 
-    def start_cf_schedule_poller(self):
-        """扫描期间后台轮询 Worker 调度；只更新账户选择，不改扫描/Xray核心逻辑。"""
-        if self.cf_schedule_poll_thread is not None and self.cf_schedule_poll_thread.is_alive():
-            return
-        self.cf_schedule_poll_stop.clear()
-        self.cf_schedule_poll_thread = threading.Thread(
-            target=self._cf_schedule_poller,
-            daemon=True
-        )
-        self.cf_schedule_poll_thread.start()
-
-    def stop_cf_schedule_poller(self):
-        """暂停/关闭扫描时停止调度轮询。"""
-        self.cf_schedule_poll_stop.set()
-        thread = self.cf_schedule_poll_thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=0.2)
-        self.cf_schedule_poll_thread = None
-
-    def _cf_schedule_poller(self):
-        """每30秒向账户1 Worker询问最新六账户额度与调度结果。"""
-        while not self.closing and not self.cf_schedule_poll_stop.is_set():
-            try:
-                backend_url = self._normalize_cf_quota_backend_url(
-                    self.cf_quota_accounts.get("backend_url", "")
-                )
-                password = self.cf_runtime_password or str(
-                    self.cf_quota_accounts.get("password", "")
-                )
-                if backend_url and password:
-                    mode = "drain" if self.cf_schedule_mode == "drain" else "balance"
-                    request = urllib.request.Request(
-                        backend_url + "/admin/get6accountschedule?mode=" + urllib.parse.quote(mode),
-                        method="GET",
-                        headers={
-                            "Accept": "application/json",
-                            "User-Agent": "CF-IP-Scanner/1.0",
-                            "X-Admin-Password": password,
-                        },
-                    )
-                    with urllib.request.urlopen(request, timeout=20) as response:
-                        body = response.read().decode("utf-8-sig", errors="replace")
-                    data = json.loads(body or "{}")
-                    if data.get("success"):
-                        self._last_cf_quota_data = data
-                        self._set_cf_schedule(data)
-                    else:
-                        print("CF调度读取失败:", data.get("error") or data.get("msg") or "未知错误")
-            except Exception as e:
-                print("CF调度轮询失败:", e)
-
-            if self.cf_schedule_poll_stop.wait(CF_QUOTA_REFRESH_SECONDS):
-                break
-
-    def _set_cf_active_account(self, account):
-        """只更新当前实际轮换到的账户标识，不刷新整张额度表。"""
-        try:
-            account = int(account)
-        except Exception:
-            return
-        if account < 1 or account > 6:
-            return
-        self.cf_quota_active_account = account
-
-        def apply():
-            if self.closing:
-                return
-            for i, row in enumerate(self.cf_quota_rows):
-                active = (i + 1) == account
-                row["name"].set(f"● 账户{i + 1}" if active else f"账户{i + 1}")
-                try:
-                    row["name_label"].configure(foreground="#008000" if active else "#333333")
-                except Exception:
-                    pass
-
-        try:
-            self.root.after(0, apply)
-        except Exception:
-            pass
-
     def _next_cf_node_config(self):
-        """使用当前调度选中的账户；只有额度调度刷新后发生切换，才切换 UUID/SNI。"""
-
+        """按调度顺序选择下一组 UUID/SNI；配置行1~6分别对应账户1~6。"""
         if not self.node_configs:
             return {"uuid": "", "sni": ""}
-
         with self.cf_schedule_lock:
             order = list(self.cf_schedule_order) or [1]
-            if self.cf_schedule_mode == "drain":
-                # 放干模式：同一账户持续使用，直到 Worker 调度把它切走。
-                account = order[0]
-            else:
-                # 平衡模式：每启动一个新的 Xray 实例前进一格。
-                account = order[self.cf_schedule_pos % len(order)]
-                self.cf_schedule_pos = (self.cf_schedule_pos + 1) % len(order)
-
+            account = order[self.cf_schedule_pos % len(order)]
+            self.cf_schedule_pos += 1
         index = account - 1
         if 0 <= index < len(self.node_configs):
-            self._set_cf_active_account(account)
             node = self.node_configs[index]
-            return {
-                "uuid": str(node.get("uuid", "")).strip(),
-                "sni": str(node.get("sni", "")).strip()
-            }
+            return {"uuid": str(node.get("uuid", "")).strip(), "sni": str(node.get("sni", "")).strip()}
         return self.get_active_node_config()
 
     def get_active_node_config(self):
@@ -2944,7 +2829,6 @@ class NirSoftCFScanner:
             "schedule_mode": "balance",
             "reserve_account1": 10,
             "reserve_accounts2_6": 5,
-            "rotation_percent": 10,
         }
 
         try:
@@ -2962,7 +2846,6 @@ class NirSoftCFScanner:
                 "schedule_mode": "drain" if str(data.get("schedule_mode", "balance")).lower() == "drain" else "balance",
                 "reserve_account1": max(0, min(100, int(data.get("reserve_account1", 10) or 10))),
                 "reserve_accounts2_6": max(0, min(100, int(data.get("reserve_accounts2_6", 5) or 5))),
-                "rotation_percent": max(1, min(100, int(data.get("rotation_percent", 10) or 10))),
             }
         except Exception as e:
             print("读取 CF 额度后台配置失败:", e)
@@ -2980,7 +2863,6 @@ class NirSoftCFScanner:
                 "schedule_mode": "drain" if str(config.get("schedule_mode", "balance")).lower() == "drain" else "balance",
                 "reserve_account1": max(0, min(100, int(config.get("reserve_account1", 10) or 10))),
                 "reserve_accounts2_6": max(0, min(100, int(config.get("reserve_accounts2_6", 5) or 5))),
-                "rotation_percent": max(1, min(100, int(config.get("rotation_percent", 10) or 10))),
             }
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(safe, f, ensure_ascii=False, indent=2)
@@ -3003,23 +2885,49 @@ class NirSoftCFScanner:
 
     def _cf_quota_login_and_query(self, backend_url, username, password, progress_callback=None):
         """登录账户1后台，然后由账户1后台统一返回账户1~6额度。"""
+        if progress_callback:
+            progress_callback("正在登录账户1后台……")
         backend_url = self._normalize_cf_quota_backend_url(backend_url)
         if not backend_url:
             raise RuntimeError("请先填写额度后台地址")
         if not password:
             raise RuntimeError("请先填写后台密码")
 
-        # 额度读取使用独立 opener；这里直接带 X-Admin-Password，
-        # 不需要重复执行 /login，但必须保留 opener 供 HTTP 请求使用。
         cookie_jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(cookie_jar)
         )
 
-        # 额度读取直接使用 Worker 支持的 X-Admin-Password 请求头。
-        # 不再每次自动刷新都重复执行 /login，避免“登录成功”标签反复出现。
+        # 当前 workers.js 的 /login 按原 CF账户按钮方式只提交 password。
+        # 登录名仅作为界面兼容字段，不参与实际登录请求。
+        login_data = urllib.parse.urlencode({
+            "password": password,
+        }).encode("utf-8")
+
+        login_request = urllib.request.Request(
+            backend_url + "/login",
+            data=login_data,
+            method="POST",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "User-Agent": "CF-IP-Scanner/1.0",
+            },
+        )
+
+        with opener.open(login_request, timeout=15) as response:
+            login_body = response.read().decode("utf-8-sig", errors="replace")
+
+        try:
+            login_json = json.loads(login_body)
+        except Exception:
+            login_json = {}
+
+        if not login_json.get("success"):
+            raise RuntimeError("额度后台登录失败，请检查后台地址和密码")
+
         if progress_callback:
-            progress_callback("正在读取账户1~6额度……")
+            progress_callback("登录成功，正在读取账户1~6额度……")
 
         usage_request = urllib.request.Request(
             backend_url + "/admin/get6AccountUsage?mode=" + urllib.parse.quote(self.cf_schedule_mode),
@@ -3142,6 +3050,12 @@ class NirSoftCFScanner:
             variable=remember_var
         ).grid(row=2, column=1, sticky="w", pady=(2, 6))
 
+        login_status_var = tk.StringVar(value="登录状态：未登录")
+        ttk.Label(
+            form,
+            textvariable=login_status_var
+        ).grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(2, 6))
+
         table = ttk.Frame(frame)
         table.pack(fill="both", expand=True)
 
@@ -3160,8 +3074,9 @@ class NirSoftCFScanner:
             limit_var = tk.StringVar(value="—")
             status_var = tk.StringVar(value="未连接")
 
-            name_label = ttk.Label(table, textvariable=name_var, anchor="center", width=widths[0])
-            name_label.grid(row=i + 1, column=0, padx=2, pady=3)
+            ttk.Label(table, textvariable=name_var, anchor="center", width=widths[0]).grid(
+                row=i + 1, column=0, padx=2, pady=3
+            )
             ttk.Label(table, textvariable=requests_var, anchor="center", width=widths[1]).grid(
                 row=i + 1, column=1, padx=2, pady=3
             )
@@ -3177,7 +3092,6 @@ class NirSoftCFScanner:
 
             self.cf_quota_rows.append({
                 "name": name_var,
-                "name_label": name_label,
                 "requests": requests_var,
                 "remain": remain_var,
                 "limit": limit_var,
@@ -3205,7 +3119,7 @@ class NirSoftCFScanner:
                     self.cf_schedule_mode,
                     self.cf_reserve_account1,
                     self.cf_reserve_accounts2_6,
-                    self.cf_rotation_percent,
+                    10,
                 ),
                 daemon=True
             ).start()
@@ -3223,10 +3137,6 @@ class NirSoftCFScanner:
         ttk.Label(reserve_box, text="  账户2-6保留").pack(side="left", padx=(8, 0))
         reserve26_var = tk.StringVar(value=str(self.cf_reserve_accounts2_6))
         ttk.Entry(reserve_box, textvariable=reserve26_var, width=4).pack(side="left", padx=(3, 0))
-        ttk.Label(reserve_box, text="%").pack(side="left")
-        ttk.Label(reserve_box, text="  轮换").pack(side="left", padx=(8, 0))
-        rotation_var = tk.StringVar(value=str(self.cf_rotation_percent))
-        ttk.Entry(reserve_box, textvariable=rotation_var, width=4).pack(side="left", padx=(3, 0))
         ttk.Label(reserve_box, text="%").pack(side="left")
 
         def on_close():
@@ -3254,17 +3164,14 @@ class NirSoftCFScanner:
                 "schedule_mode": self.cf_schedule_mode,
                 "reserve_account1": max(0, min(100, int(reserve1_var.get().strip() or 10))),
                 "reserve_accounts2_6": max(0, min(100, int(reserve26_var.get().strip() or 5))),
-                "rotation_percent": max(1, min(100, int(rotation_var.get().strip() or 10))),
             }
             if not config["backend_url"]:
                 messagebox.showwarning("提示", "请填写额度后台地址。", parent=dialog)
                 return
             if self.save_cf_quota_config(config):
                 self.cf_quota_accounts = config
-                self.cf_runtime_password = config["password"]
                 self.cf_reserve_account1 = config["reserve_account1"]
                 self.cf_reserve_accounts2_6 = config["reserve_accounts2_6"]
-                self.cf_rotation_percent = config["rotation_percent"]
                 threading.Thread(
                     target=self._sync_cf_schedule_to_worker,
                     args=(
@@ -3273,7 +3180,7 @@ class NirSoftCFScanner:
                         config["schedule_mode"],
                         config["reserve_account1"],
                         config["reserve_accounts2_6"],
-                        config["rotation_percent"],
+                        10,
                     ),
                     daemon=True
                 ).start()
@@ -3298,7 +3205,6 @@ class NirSoftCFScanner:
                 messagebox.showwarning("提示", "请先填写后台密码。", parent=dialog)
                 return
 
-            self.cf_runtime_password = password
             self.cf_quota_accounts = {
                 "backend_url": backend_url,
                 "username": username,
@@ -3308,19 +3214,24 @@ class NirSoftCFScanner:
 
             self.cf_quota_refreshing = True
             refresh_button.config(state="disabled")
+            login_status_var.set("登录状态：正在登录……")
             total_var.set("正在连接账户1后台并读取账户1~6……")
-            # 刷新额度时保留当前六账户数据，不清空表格，避免整版闪烁。
-            # 后台读取完成后只更新发生变化的数字和状态。
+            for row in self.cf_quota_rows:
+                row["status"].set("读取中…")
+                row["requests"].set("—")
+                row["remain"].set("—")
+                row["limit"].set("—")
+
             def progress_callback(message):
                 if dialog.winfo_exists():
                     try:
-                        dialog.after(0, lambda m=message: total_var.set(m))
+                        dialog.after(0, lambda m=message: login_status_var.set("登录状态：" + m))
                     except Exception:
                         pass
 
             threading.Thread(
                 target=self._refresh_cf_quota_worker,
-                args=(dialog, refresh_button, total_var, backend_url, username, password, progress_callback),
+                args=(dialog, refresh_button, total_var, backend_url, username, password, progress_callback, login_status_var),
                 daemon=True
             ).start()
 
@@ -3332,7 +3243,7 @@ class NirSoftCFScanner:
 
     def _refresh_cf_quota_worker(
         self, dialog, refresh_button, total_var,
-        backend_url, username, password, progress_callback=None
+        backend_url, username, password, progress_callback=None, login_status_var=None
     ):
         try:
             data = self._cf_quota_login_and_query(
@@ -3382,10 +3293,13 @@ class NirSoftCFScanner:
                 self._set_cf_schedule(getattr(self, "_last_cf_quota_data", {}))
             if total_requests is None:
                 error_text = next((x[4] for x in results if x[4]), "未知错误")
-                total_var.set(f"连接状态：失败 — {error_text}")
+                login_status_var.set(f"登录状态：失败 — {error_text}") if login_status_var is not None else None
+                total_var.set("连接失败，请检查后台地址 / 登录信息")
             else:
+                if login_status_var is not None:
+                    login_status_var.set("登录状态：已登录 ✓")
                 total_var.set(
-                    f"连接成功 ✓    总请求：{total_requests:,}    总剩余：{total_remaining:,}"
+                    f"总请求：{total_requests:,}    总剩余：{total_remaining:,}"
                 )
 
             self.cf_quota_refreshing = False
