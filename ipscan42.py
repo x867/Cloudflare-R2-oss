@@ -1123,7 +1123,7 @@ class NirSoftCFScanner:
 
                 # 如果后台没有直接给账户1 nodeinfo，则尝试账户1候选地址。
                 if not shared_uuid:
-                    candidates1 = account1.get("candidates") or []
+                    candidates1 = [backend_url] + (account1.get("candidates") or [])
                     for candidate in candidates1:
                         url = str(candidate.get("url") or candidate.get("hostname") or "").strip() if isinstance(candidate, dict) else str(candidate or "").strip()
                         if not url:
