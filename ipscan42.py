@@ -3734,25 +3734,54 @@ class NirSoftCFScanner:
 
             if total_requests is not None:
                 self._set_cf_schedule(getattr(self, "_last_cf_quota_data", {}))
-                # 当前真正承担大流量的账户用醒目标识显示；额度耗尽后标识会自动跳到下一个账户。
+                # 状态直接显示对应账户当前使用的 SNI：
+                # 绿色 = 当前正在使用；黄色 = 到达保留/限制点；红色 = 已放干。
                 with self.cf_schedule_lock:
                     active_account = int(getattr(self, "cf_current_account", 6) or 6)
                 for i, row in enumerate(self.cf_quota_rows):
                     if results[i][4] is None:
                         remain_value = results[i][2]
-                        if i + 1 == active_account and remain_value is not None and remain_value > 0:
-                            row["status"].set("大流量中")
+                        account_no = i + 1
+                        node = self.node_configs[i] if i < len(self.node_configs) else {}
+                        snis = node.get("snis", []) if isinstance(node, dict) else []
+                        if not isinstance(snis, list):
+                            snis = [str(node.get("sni", "")).strip()] if isinstance(node, dict) and node.get("sni") else []
+                        current_sni = next((str(x).strip() for x in snis if str(x).strip()), "")
+                        if not current_sni:
+                            current_sni = str(node.get("sni", "")).strip() if isinstance(node, dict) else ""
+
+                        reserve_percent = (
+                            self.cf_reserve_account1
+                            if account_no == 1
+                            else self.cf_reserve_accounts2_6
+                        )
+                        limit_value = results[i][3]
+                        reserve_value = (
+                            int(limit_value * reserve_percent / 100)
+                            if limit_value is not None
+                            else 0
+                        )
+
+                        if remain_value is not None and remain_value <= 0:
+                            row["status"].set(current_sni or "—")
+                            try:
+                                row["status_label"].configure(foreground="#d00000")
+                            except Exception:
+                                pass
+                        elif remain_value is not None and remain_value <= reserve_value:
+                            row["status"].set(current_sni or "—")
+                            try:
+                                row["status_label"].configure(foreground="#d4a000")
+                            except Exception:
+                                pass
+                        elif account_no == active_account and remain_value is not None and remain_value > 0:
+                            row["status"].set(current_sni or "—")
                             try:
                                 row["status_label"].configure(foreground="#008000")
                             except Exception:
                                 pass
-                        elif remain_value is not None and remain_value <= 0:
-                            row["status"].set("已到上限")
-                            try:
-                                row["status_label"].configure(foreground="#000000")
-                            except Exception:
-                                pass
                         else:
+                            row["status"].set("—")
                             try:
                                 row["status_label"].configure(foreground="#000000")
                             except Exception:
