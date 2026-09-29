@@ -36,6 +36,14 @@ export default {
 		const hosts = env.HOST ? (await 整理成数组(env.HOST)).map(h => h.toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0]) : [url.hostname];
 		const host = hosts[0];
 		const 访问路径 = url.pathname.slice(1).toLowerCase();
+		// 自动识别接口：直接返回当前 Worker 的 UUID/SNI，不经过管理员登录验证。
+		if (访问路径 === 'admin/nodeinfo' && request.method === 'GET') {
+			return new Response(JSON.stringify({ success: true, uuid: userID, sni: host, hosts }), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' }
+			});
+		}
+
 		调试日志打印 = ['1', 'true'].includes(env.DEBUG) || 调试日志打印;
 		预加载竞速拨号 = ['1', 'true'].includes(env.PRELOAD_RACE_DIAL) || 预加载竞速拨号;
 		反代并发拨号数 = Math.max(1, Number(env.PROXY_CONCURRENT_DIAL) || 反代并发拨号数);
@@ -110,23 +118,6 @@ export default {
 					const headerPassword = request.headers.get('X-Admin-Password') || '';
 					const cookieOK = !!authCookie && authCookie === await MD5MD5(UA + 加密秘钥 + 管理员密码);
 					const headerOK = headerPassword === (typeof 管理员密码 === 'string' ? 管理员密码.replace(/[\r\n]/g, '') : 管理员密码);
-					// 管理客户端可使用密码请求头，浏览器原有Cookie登录仍然兼容。
-					// UUID/SNI 仅用于扫描软件自动识别节点，不再依赖管理员密码。
-					// 这样账户1后台可以直接探测账户2~6的 Worker，不要求六个 Worker 使用相同密码。
-					if (访问路径 === 'admin/nodeinfo' && request.method === 'GET') {
-						return new Response(JSON.stringify({
-							success: true,
-							uuid: userID,
-							sni: host,
-							hosts
-						}), {
-							status: 200,
-							headers: {
-								'Content-Type': 'application/json;charset=utf-8',
-								'Cache-Control': 'no-store'
-							}
-						});
-					}
 					if (!cookieOK && !headerOK) {
 						if (访问路径.startsWith('admin/') && request.headers.get('Accept')?.includes('application/json')) {
 							return new Response(JSON.stringify({ success: false, error: '管理员密码验证失败' }), {
@@ -144,14 +135,6 @@ export default {
 						} catch (err) {
 							return new Response(JSON.stringify({ success: false, error: err?.message || String(err) }), { status: 500, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 						}
-					} else if (访问路径 === 'admin/nodeinfo') {// 当前 Worker 的 UUID / SNI 信息（仅管理员密码可访问）
-						if (request.method !== 'GET') return new Response('Method Not Allowed', { status: 405 });
-						return new Response(JSON.stringify({
-							success: true,
-							uuid: userID,
-							sni: host,
-							hosts
-						}), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' } });
 					} else if (访问路径 === 'admin/cfaccountconfig') {// 六账户 Account ID / Token 配置页面
 						if (request.method === 'GET') return new Response(await html六账户配置(env), { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-store' } });
 						if (request.method === 'POST') {
