@@ -695,8 +695,7 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 	const rotationPercent = Number.isFinite(Number(cfg.rotationPercent))
 		? Math.min(100, Math.max(1, Number(cfg.rotationPercent))) : 10;
 
-	// 主账户1；备用账户固定轮换顺序：6 → 5 → 4 → 3 → 2。
-	// 平衡模式和放干模式都以这个顺序为基础，区别只在“何时退出账户”。
+	// 主账户1；备用账户固定优先顺序：6 → 5 → 4 → 3 → 2。
 	const cycle = [1, 6, 5, 4, 3, 2];
 
 	const enriched = accounts.map((item, index) => {
@@ -704,8 +703,8 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		const used = Math.max(0, Number(item.todayUsed) || 0);
 		const remaining = Math.max(0, Number(item.todayRemaining) || 0);
 
-		// 账户1始终保留 reserve1%；平衡模式下账户2~6保留 reserveOther%。
-		// 放干模式下账户2~6不设软件保留线，允许一直使用到 Cloudflare 实际停止/拒绝。
+		// 平衡模式：账户1保留 reserve1%；账户2~6各保留 reserveOther%。
+		// 放干模式：账户1仍保留 reserve1%；账户2~6允许一直使用到实际耗尽/Cloudflare拒绝。
 		const reservePercent = normalizedMode === 'drain'
 			? (index === 0 ? reserve1Percent : 0)
 			: (index === 0 ? reserve1Percent : reserveOtherPercent);
@@ -742,7 +741,7 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		// 放干模式：
 		// 1. 账户1先使用到保留线；
 		// 2. 然后严格 6→5→4→3→2 依次放干；
-		// 3. 账户2~6不因5%软件保留线退出，直到额度实际耗尽/Cloudflare拒绝。
+		// 3. 账户2~6不设5%软件保留线，直到额度实际耗尽/Cloudflare拒绝。
 		if (enriched[0].todayRemaining > enriched[0].reserve) {
 			selectedAccount = 1;
 		} else {
@@ -753,15 +752,19 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		if (selectedAccount) order = [selectedAccount];
 	} else {
 		// 平衡模式：
-		// 账户1保留 reserve1%，账户2~6各保留 reserveOther%。
-		// 只要账户仍高于自己的保留线，就加入轮换队列。
-		// 不再按“谁剩余最多/谁使用比例最低”排序，避免某个账户在刷新周期内被偏向使用。
-		// 固定轮换顺序：账户1 → 6 → 5 → 4 → 3 → 2。
-		// 因此账户1只要还有可用余额，就会与账户6~2共同参与轮换。
-		order = cycle.filter(account => {
-			const item = enriched[account - 1];
-			return item && item.todayRemaining > item.reserve;
-		});
+		// 账户1保留10%（可设置），账户2~6保留5%（可设置）。
+		// 所有高于各自保留线的账户都参与轮换。
+		// 优先让“当前使用比例最低”的账户进入队列，从而让六账户的请求量逐步趋于平均。
+		// 使用固定 cycle 作为同使用比例时的稳定排序：1 → 6 → 5 → 4 → 3 → 2。
+		const cycleRank = new Map(cycle.map((account, index) => [account, index]));
+		order = enriched
+			.filter(item => item.todayRemaining > item.reserve)
+			.sort((a, b) => {
+				const ratioDiff = a.usedRatio - b.usedRatio;
+				if (Math.abs(ratioDiff) > 0.000001) return ratioDiff;
+				return cycleRank.get(a.account) - cycleRank.get(b.account);
+			})
+			.map(item => item.account);
 		selectedAccount = order[0] || null;
 	}
 
