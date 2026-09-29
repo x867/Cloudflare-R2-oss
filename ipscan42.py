@@ -3450,8 +3450,8 @@ class NirSoftCFScanner:
         table = ttk.Frame(frame)
         table.pack(fill="both", expand=True)
 
-        headers = ["账户", "今日请求", "今日剩余", "状态", "UUID", "SNI"]
-        widths = [8, 12, 12, 8, 34, 20]
+        headers = ["账户", "今日请求", "今日剩余", "UUID", "SNI"]
+        widths = [8, 12, 12, 34, 24]
         for col, (title, width) in enumerate(zip(headers, widths)):
             ttk.Label(
                 table, text=title, anchor="center", width=width
@@ -3463,8 +3463,6 @@ class NirSoftCFScanner:
             requests_var = tk.StringVar(value="—")
             remain_var = tk.StringVar(value="—")
             limit_var = tk.StringVar(value="—")
-            status_var = tk.StringVar(value="未连接")
-
             node = self.node_configs[i] if i < len(self.node_configs) else {}
             uuid_var = tk.StringVar(value=str(node.get("uuid", "")).strip() or "—")
             snis = node.get("snis", [])
@@ -3480,15 +3478,12 @@ class NirSoftCFScanner:
             ttk.Label(table, textvariable=remain_var, anchor="center", width=widths[2]).grid(
                 row=i + 1, column=2, padx=2, pady=3
             )
-            status_label = ttk.Label(table, textvariable=status_var, anchor="center", width=widths[3])
-            status_label.grid(
+            ttk.Label(table, textvariable=uuid_var, anchor="center", width=widths[3]).grid(
                 row=i + 1, column=3, padx=2, pady=3
             )
-            ttk.Label(table, textvariable=uuid_var, anchor="center", width=widths[4]).grid(
+            sni_label = ttk.Label(table, textvariable=sni_var, anchor="center", width=widths[4])
+            sni_label.grid(
                 row=i + 1, column=4, padx=2, pady=3
-            )
-            ttk.Label(table, textvariable=sni_var, anchor="center", width=widths[5]).grid(
-                row=i + 1, column=5, padx=2, pady=3
             )
 
             self.cf_quota_rows.append({
@@ -3496,10 +3491,9 @@ class NirSoftCFScanner:
                 "requests": requests_var,
                 "remain": remain_var,
                 "limit": limit_var,
-                "status": status_var,
-                "status_label": status_label,
                 "uuid": uuid_var,
                 "sni": sni_var,
+                "sni_label": sni_label,
             })
 
         bottom = ttk.Frame(frame)
@@ -3723,18 +3717,18 @@ class NirSoftCFScanner:
 
                 if error:
                     # 读取失败时保留原来的数值，只更新状态。
-                    row["status"].set("读取失败")
+                    row["sni"].set(row["sni"].get() or "—")
                     continue
 
                 row["name"].set(f"账户{i + 1}")
                 row["requests"].set(f"{used:,}")
                 row["remain"].set(f"{remain:,}")
                 row["limit"].set(f"{limit:,}")
-                row["status"].set("正常" if remain > 0 else "已到上限")
+                row["sni"].set(row["sni"].get() or "—")
 
             if total_requests is not None:
                 self._set_cf_schedule(getattr(self, "_last_cf_quota_data", {}))
-                # 状态直接显示对应账户当前使用的 SNI：
+                # 直接给 SNI 列着色：
                 # 绿色 = 当前正在使用；黄色 = 到达保留/限制点；红色 = 已放干。
                 with self.cf_schedule_lock:
                     active_account = int(getattr(self, "cf_current_account", 6) or 6)
@@ -3742,14 +3736,6 @@ class NirSoftCFScanner:
                     if results[i][4] is None:
                         remain_value = results[i][2]
                         account_no = i + 1
-                        node = self.node_configs[i] if i < len(self.node_configs) else {}
-                        snis = node.get("snis", []) if isinstance(node, dict) else []
-                        if not isinstance(snis, list):
-                            snis = [str(node.get("sni", "")).strip()] if isinstance(node, dict) and node.get("sni") else []
-                        current_sni = next((str(x).strip() for x in snis if str(x).strip()), "")
-                        if not current_sni:
-                            current_sni = str(node.get("sni", "")).strip() if isinstance(node, dict) else ""
-
                         reserve_percent = (
                             self.cf_reserve_account1
                             if account_no == 1
@@ -3762,30 +3748,18 @@ class NirSoftCFScanner:
                             else 0
                         )
 
-                        if remain_value is not None and remain_value <= 0:
-                            row["status"].set(current_sni or "—")
-                            try:
-                                row["status_label"].configure(foreground="#d00000")
-                            except Exception:
-                                pass
-                        elif remain_value is not None and remain_value <= reserve_value:
-                            row["status"].set(current_sni or "—")
-                            try:
-                                row["status_label"].configure(foreground="#d4a000")
-                            except Exception:
-                                pass
-                        elif account_no == active_account and remain_value is not None and remain_value > 0:
-                            row["status"].set(current_sni or "—")
-                            try:
-                                row["status_label"].configure(foreground="#008000")
-                            except Exception:
-                                pass
-                        else:
-                            row["status"].set("—")
-                            try:
-                                row["status_label"].configure(foreground="#000000")
-                            except Exception:
-                                pass
+                        try:
+                            if remain_value is not None and remain_value <= 0:
+                                row["sni_label"].configure(foreground="#d00000")
+                            elif remain_value is not None and remain_value <= reserve_value:
+                                row["sni_label"].configure(foreground="#d4a000")
+                            elif account_no == active_account and remain_value is not None and remain_value > 0:
+                                row["sni_label"].configure(foreground="#008000")
+                            else:
+                                row["sni_label"].configure(foreground="#333333")
+                        except Exception:
+                            pass
+
             if total_requests is None:
                 error_text = next((x[4] for x in results if x[4]), "未知错误")
                 error_lower = str(error_text).lower()
