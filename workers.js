@@ -704,19 +704,16 @@ async function get6AccountWorkerNodeInfo(env) {
 			continue;
 		}
 		try {
-			// 先验证“这个 Token 是否真的属于当前账户且仍然有效”。
 			const verify = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/tokens/verify', token, '账户' + (i + 1) + ' Token 验证失败');
 			const tokenStatus = String(verify?.result?.status || '').trim();
-			if (tokenStatus && tokenStatus !== 'active') {
-				throw new Error('账户' + (i + 1) + ' Token 状态：' + tokenStatus);
-			}
+			if (tokenStatus && tokenStatus !== 'active') throw new Error('账户' + (i + 1) + ' Token 状态：' + tokenStatus);
 
 			const candidates = [];
 			let subdomain = '';
 			let scripts = [];
 			let domainError = '';
 
-			// 先走最稳定的 Script 列表 + workers.dev 子域。
+			// 读取账户 workers.dev 主域名。
 			try {
 				const sub = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/subdomain', token, '账户' + (i + 1) + ' Workers 子域名读取失败');
 				subdomain = String(sub?.result?.subdomain || '').trim();
@@ -724,6 +721,7 @@ async function get6AccountWorkerNodeInfo(env) {
 				domainError = e?.message || String(e);
 			}
 
+			// 读取账户内实际存在的 Worker Script 名称。
 			try {
 				const list = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/scripts', token, '账户' + (i + 1) + ' Worker 列表读取失败');
 				scripts = Array.isArray(list?.result) ? list.result : [];
@@ -731,40 +729,75 @@ async function get6AccountWorkerNodeInfo(env) {
 				if (!domainError) domainError = e?.message || String(e);
 			}
 
-			if (subdomain && scripts.length) {
-				for (const script of scripts) {
-					const name = String(script?.id || '').trim();
-					if (name) candidates.push({
-						url: 'https://' + name + '.' + subdomain + '.workers.dev',
-						hostname: name + '.' + subdomain + '.workers.dev',
-						source: 'workers-dev',
-						service: name
-					});
+			const scriptNames = new Set(
+				scripts.map(script => String(script?.id || script?.name || '').trim()).filter(Boolean)
+			);
+
+			// 只有确认该 Worker 自己启用了 workers.dev，才生成 workers.dev 地址。
+			// Cloudflare 的 Worker URL 规则是：<Worker名称>.<账户子域>.workers.dev。
+			if (subdomain && scriptNames.size) {
+				for (const name of scriptNames) {
+					try {
+						const sub = await fetchJSON(
+							API_BASE + encodeURIComponent(accountId) + '/workers/scripts/' + encodeURIComponent(name) + '/subdomain',
+							token,
+							'账户' + (i + 1) + ' Worker ' + name + ' workers.dev 状态读取失败'
+						);
+						if (sub?.result?.enabled === true) {
+							const hostname = name + '.' + subdomain + '.workers.dev';
+							candidates.push({ url: 'https://' + hostname, hostname, source: 'workers-dev', service: name });
+						}
+					} catch (e) {
+						if (!domainError) domainError = e?.message || String(e);
+					}
 				}
 			}
 
-			// 自定义域名独立查询；即使这一项失败，也保留 workers.dev 候选。
+			// Worker Domains API 明确返回 hostname + service。
+			// 只有 service 与账户内真实 Worker Script 对得上时，才优先认为这个域名属于该 Worker。
 			try {
 				const domains = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/domains', token, '账户' + (i + 1) + ' Worker 域名读取失败');
-				for (const item of (Array.isArray(domains?.result) ? domains.result : [])) {
+				const domainItems = Array.isArray(domains?.result) ? domains.result : [];
+				const matchedDomains = [];
+				const unmatchedDomains = [];
+				for (const item of domainItems) {
 					const hostname = String(item?.hostname || '').trim();
-					if (hostname) candidates.unshift({
+					const service = String(item?.service || '').trim();
+					if (!hostname) continue;
+					const candidate = {
 						url: 'https://' + hostname,
 						hostname,
 						source: 'workers-domain',
-						service: String(item?.service || '')
-					});
+						service,
+						serviceMatched: !!service && scriptNames.has(service)
+					};
+					if (candidate.serviceMatched) matchedDomains.push(candidate);
+					else unmatchedDomains.push(candidate);
 				}
+				// 先尝试 service 明确对应的域名，再尝试没有脚本映射的域名作为最后兜底。
+				candidates.unshift(...matchedDomains);
+				if (!matchedDomains.length) candidates.push(...unmatchedDomains);
 			} catch (e) {
 				if (!domainError) domainError = e?.message || String(e);
 			}
 
+			// 去重，避免同一个域名被多个发现路径重复探测。
+			const unique = [];
+			const seen = new Set();
+			for (const item of candidates) {
+				const key = String(item?.url || '').trim().replace(/\/$/, '').toLowerCase();
+				if (!key || seen.has(key)) continue;
+				seen.add(key);
+				unique.push(item);
+			}
+
 			results.push({
 				account: i + 1,
-				success: candidates.length > 0,
+				success: unique.length > 0,
 				tokenStatus: tokenStatus || 'active',
-				candidates: candidates.slice(0, 20),
-				error: candidates.length ? '' : (domainError || '未找到可用 Worker 域名')
+				scripts: [...scriptNames],
+				candidates: unique.slice(0, 30),
+				error: unique.length ? '' : (domainError || '未找到可用 Worker 域名')
 			});
 		} catch (err) {
 			results.push({
