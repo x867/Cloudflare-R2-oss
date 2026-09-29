@@ -3581,8 +3581,6 @@ class NirSoftCFScanner:
                 pass
         self.quota_button.config(text="返回", command=on_close)
 
-        refresh_button = ttk.Button(bottom, text="刷新额度", width=11)
-        refresh_button.pack(side="right", padx=(6, 0))
         save_button = ttk.Button(bottom, text="保存配置", width=11)
         save_button.pack(side="right", padx=(6, 0))
 
