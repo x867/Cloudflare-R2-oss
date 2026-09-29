@@ -345,6 +345,13 @@ class NirSoftCFScanner:
             font=("Consolas", 10), undo=True
         )
         self.config_sni_uuid_entry.pack(side="left", fill="both", expand=True)
+        self.config_auto_fetch_button = ttk.Button(
+            cfg_text_frame,
+            text="自动获取六账户",
+            width=14,
+            command=self.auto_fetch_six_worker_configs
+        )
+        self.config_auto_fetch_button.pack(side="right", anchor="ne", padx=(4, 0), pady=(0, 2))
         cfg_text_scroll = ttk.Scrollbar(
             cfg_text_frame, orient="vertical", command=self.config_sni_uuid_entry.yview
         )
@@ -966,6 +973,143 @@ class NirSoftCFScanner:
         if getattr(self, "_subnet_placeholder_active", False):
             return ""
         return self.config_subnet_entry.get("1.0", "end-1c")
+
+    def _normalize_worker_info_url(self, value):
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        if " / " in value:
+            value = value.split(" / ", 1)[0].strip()
+        value = re.sub(r"^https?://", "", value, flags=re.I).split("/", 1)[0].strip()
+        if not value:
+            return ""
+        return "https://" + value
+
+    def _fetch_worker_nodeinfo(self, worker_url, password):
+        worker_url = self._normalize_worker_info_url(worker_url)
+        if not worker_url:
+            raise RuntimeError("Worker 地址为空")
+        request = urllib.request.Request(
+            worker_url.rstrip("/") + "/admin/nodeinfo",
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "CF-IP-Scanner/1.0",
+                "X-Admin-Password": str(password or ""),
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                body = response.read().decode("utf-8-sig", errors="replace")
+                status = response.getcode()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8-sig", errors="replace").strip()[:180]
+            raise RuntimeError(
+                f"HTTP {e.code}" + (f"：{detail}" if detail else "")
+            ) from e
+        if status != 200:
+            raise RuntimeError(f"HTTP {status}")
+        try:
+            data = json.loads(body or "{}")
+        except Exception as e:
+            raise RuntimeError("Worker 返回的不是有效 JSON") from e
+        if not data.get("success"):
+            raise RuntimeError(str(data.get("error") or data.get("msg") or "Worker 信息读取失败"))
+        uuid = str(data.get("uuid", "")).strip()
+        sni = str(data.get("sni", "")).strip()
+        if not uuid or not sni:
+            raise RuntimeError("Worker 没有返回完整 UUID/SNI")
+        return {"uuid": uuid, "sni": sni}
+
+    def auto_fetch_six_worker_configs(self):
+        """自动访问当前六条 Worker 地址，读取实际 UUID/SNI，并立即保存到 config.ini。"""
+        if getattr(self, "config_readonly", False):
+            return
+        self._config_read_current()
+        current = list(self.node_configs)
+        backend_url = str(self.cf_quota_accounts.get("backend_url", "")).strip()
+        password = str(self.cf_quota_accounts.get("password", "") or "").strip()
+
+        if not password:
+            messagebox.showwarning(
+                "提示",
+                "自动获取需要 Worker 管理员密码。\n请在“CF配置”中勾选“保存登录信息”后再获取。"
+            )
+            return
+
+        urls = []
+        for i in range(6):
+            item = current[i] if i < len(current) else {}
+            sni = str(item.get("sni", "")).strip()
+            if i == 0 and not sni:
+                sni = backend_url
+            urls.append(sni)
+
+        missing = [str(i + 1) for i, url in enumerate(urls) if not str(url).strip()]
+        if missing:
+            messagebox.showwarning(
+                "无法自动获取",
+                "账户" + "、".join(missing) + "缺少 Worker 地址。\n"
+                "请先让对应账户的 Worker 地址出现在 UUID/SNI 文本框中。"
+            )
+            return
+
+        try:
+            self.config_auto_fetch_button.config(state="disabled")
+        except Exception:
+            pass
+
+        def worker():
+            results = []
+            for i, url in enumerate(urls):
+                try:
+                    info = self._fetch_worker_nodeinfo(url, password)
+                    results.append((i, info, None))
+                except Exception as e:
+                    results.append((i, None, str(e)))
+
+            def apply():
+                try:
+                    for i, info, error in results:
+                        if info is not None:
+                            while len(self.node_configs) <= i:
+                                self.node_configs.append({"uuid": "", "sni": ""})
+                            self.node_configs[i] = {
+                                "uuid": info["uuid"],
+                                "sni": info["sni"],
+                            }
+
+                    success_count = sum(1 for _, info, _ in results if info is not None)
+                    if success_count:
+                        self._config_show_current()
+                        self.save_node_configs_file()
+                        self.config_index = min(self.config_index, len(self.node_configs) - 1)
+
+                    failed = [
+                        f"账户{i + 1}：{error}"
+                        for i, info, error in results
+                        if info is None
+                    ]
+                    if failed:
+                        messagebox.showwarning(
+                            "自动获取完成",
+                            f"已获取并保存 {success_count}/6 个账户的 UUID/SNI。\n\n"
+                            + "\n".join(failed)
+                        )
+                    else:
+                        messagebox.showinfo(
+                            "自动获取完成",
+                            "六个账户的实际 UUID/SNI 已全部获取并自动保存。"
+                        )
+                finally:
+                    try:
+                        self.config_auto_fetch_button.config(state="normal")
+                    except Exception:
+                        pass
+
+            self.root.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _set_sni_uuid_placeholder(self):
         """UUID / SNI 文本框为空时显示浅色使用提示；提示文字不参与保存。"""
