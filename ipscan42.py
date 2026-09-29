@@ -3128,17 +3128,6 @@ class NirSoftCFScanner:
         ttk.Checkbutton(mode_box, text="放干模式", variable=schedule_mode_var, command=on_schedule_mode_change).pack(side="left")
         ttk.Label(mode_box, textvariable=schedule_mode_text, width=8).pack(side="left", padx=(4, 0))
 
-        reserve_box = ttk.Frame(bottom)
-        reserve_box.pack(side="left", padx=(18, 0))
-        ttk.Label(reserve_box, text="账户1保留").pack(side="left")
-        reserve1_var = tk.StringVar(value=str(self.cf_reserve_account1))
-        ttk.Entry(reserve_box, textvariable=reserve1_var, width=4).pack(side="left", padx=(3, 0))
-        ttk.Label(reserve_box, text="%").pack(side="left")
-        ttk.Label(reserve_box, text="  账户2-6保留").pack(side="left", padx=(8, 0))
-        reserve26_var = tk.StringVar(value=str(self.cf_reserve_accounts2_6))
-        ttk.Entry(reserve_box, textvariable=reserve26_var, width=4).pack(side="left", padx=(3, 0))
-        ttk.Label(reserve_box, text="%").pack(side="left")
-
         def on_close():
             self.cf_quota_dialog = None
             self.cf_quota_refreshing = False
@@ -3162,8 +3151,8 @@ class NirSoftCFScanner:
                 "password": password_var.get(),
                 "remember": bool(remember_var.get()),
                 "schedule_mode": self.cf_schedule_mode,
-                "reserve_account1": max(0, min(100, int(reserve1_var.get().strip() or 10))),
-                "reserve_accounts2_6": max(0, min(100, int(reserve26_var.get().strip() or 5))),
+                "reserve_account1": self.cf_reserve_account1,
+                "reserve_accounts2_6": self.cf_reserve_accounts2_6,
             }
             if not config["backend_url"]:
                 messagebox.showwarning("提示", "请填写额度后台地址。", parent=dialog)
