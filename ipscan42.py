@@ -1258,14 +1258,15 @@ class NirSoftCFScanner:
                     ]
                     order = [eligible[0]] if eligible else []
                 else:
-                    # 回退时按“可用余额从多到少”建立完整轮换队列。
-                    eligible = [
-                        (account, remain, reserve)
-                        for account, remain, reserve in enriched
-                        if remain > reserve
+                    # 回退时也保持与 Worker 一致的固定轮换顺序：
+                    # 账户1 → 6 → 5 → 4 → 3 → 2。
+                    # 只要账户高于自己的保留线，就参与轮换。
+                    cycle = [1, 6, 5, 4, 3, 2]
+                    order = [
+                        account for account in cycle
+                        for item_account, remain, reserve in enriched
+                        if item_account == account and remain > reserve
                     ]
-                    eligible.sort(key=lambda item: max(0, item[1] - item[2]), reverse=True)
-                    order = [account for account, remain, reserve in eligible]
             except Exception:
                 order = []
         if order:
