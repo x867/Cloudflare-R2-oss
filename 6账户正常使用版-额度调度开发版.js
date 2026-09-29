@@ -754,19 +754,13 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 	} else {
 		// 平衡模式：
 		// 账户1保留 reserve1%，账户2~6各保留 reserveOther%。
-		// 所有仍有“可用余额”的账户都参与轮换；账户1只要高于保留线，就继续参与。
-		// 用“已使用比例”而不是绝对剩余次数判断谁更需要被使用，
-		// 这样不同每日额度的账户也能按比例趋于均衡。
-		// 比例相同时保持 1→6→5→4→3→2 的固定顺序。
-		const eligible = cycle.filter(account => {
+		// 只要账户仍高于自己的保留线，就加入轮换队列。
+		// 不再按“谁剩余最多/谁使用比例最低”排序，避免某个账户在刷新周期内被偏向使用。
+		// 固定轮换顺序：账户1 → 6 → 5 → 4 → 3 → 2。
+		// 因此账户1只要还有可用余额，就会与账户6~2共同参与轮换。
+		order = cycle.filter(account => {
 			const item = enriched[account - 1];
 			return item && item.todayRemaining > item.reserve;
-		});
-		order = eligible.slice().sort((a, b) => {
-			const ar = Number(enriched[a - 1]?.usedRatio || 0);
-			const br = Number(enriched[b - 1]?.usedRatio || 0);
-			if (ar !== br) return ar - br;
-			return cycle.indexOf(a) - cycle.indexOf(b);
 		});
 		selectedAccount = order[0] || null;
 	}
