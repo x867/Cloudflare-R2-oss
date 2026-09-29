@@ -1021,8 +1021,6 @@ class NirSoftCFScanner:
                 detail = f"返回 HTML" + (f"（{title}）" if title else "")
             else:
                 detail = f"返回非 JSON" + (f"（Content-Type: {content_type}）" if content_type else "")
-            if preview and not title_match if False else False:
-                pass
             raise RuntimeError(detail) from e
         if not data.get("success"):
             raise RuntimeError(str(data.get("error") or data.get("msg") or "Worker 信息读取失败"))
