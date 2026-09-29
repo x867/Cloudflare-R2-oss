@@ -2400,7 +2400,9 @@ class NirSoftCFScanner:
         with open(template_path, "r", encoding="utf-8") as f:
             config = json.load(f)
 
-        self.apply_node_config(config)
+        # 下载测速也必须使用当前六账户轮换节点，不能回退到账户1。
+        scheduled_node = self._next_cf_node_config()
+        self.apply_node_config(config, scheduled_node)
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
