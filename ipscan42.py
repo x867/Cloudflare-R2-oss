@@ -1203,10 +1203,11 @@ class NirSoftCFScanner:
                             item["uuid"] = shared_uuid
 
                     success_count = sum(1 for _, info, _ in results if info is not None)
+                    # SNI 获取成功后立即写入文本框；不依赖 UUID 是否同时存在。
+                    self._config_show_current()
                     if shared_uuid:
-                        self._config_show_current()
                         self.save_node_configs_file()
-                        self.config_index = min(self.config_index, len(self.node_configs) - 1)
+                    self.config_index = min(self.config_index, len(self.node_configs) - 1)
 
                     failed = [f"账户{i + 1}：{error}" for i, info, error in results if info is None]
                     if failed:
@@ -1238,7 +1239,7 @@ class NirSoftCFScanner:
             self.config_sni_uuid_entry.delete("1.0", "end")
             self.config_sni_uuid_entry.insert(
                 "1.0",
-                "一行一个 SNI/域名（按账户1→6顺序）；六个子账户共用账户1获取的 UUID"
+                "一行一个 SNI/域名（按账户1→6顺序）"
             )
             self.config_sni_uuid_entry.tag_add("sni_uuid_placeholder", "1.0", "end")
             self.config_sni_uuid_entry.tag_configure("sni_uuid_placeholder", foreground="#aaaaaa")
