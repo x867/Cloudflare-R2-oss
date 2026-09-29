@@ -90,6 +90,8 @@ class NirSoftCFScanner:
         self.cf_quota_logged_in = False
         self.cf_quota_login_key = None
         self.cf_quota_refresh_after_id = None
+        self.cf_quota_active_refresh_after_id = None
+        self.cf_quota_active_refreshing = False
         self.cf_quota_rows = []
         # 账户轮换固定使用放干模式：6 → 5 → 4 → 3 → 2 → 1。
         # 即使旧的 cf_quota_config.json 保存过“平衡模式”，启动后也自动迁移到本规则。
@@ -3363,6 +3365,51 @@ class NirSoftCFScanner:
 
         return data
 
+    def _refresh_cf_active_row(self, dialog, backend_url, password):
+        """仅快速刷新当前正在使用账户的今日请求/剩余，不改变完整六账户刷新周期。"""
+        if self.closing or self.cf_quota_dialog is not dialog or self.cf_quota_active_refreshing:
+            return
+        if not backend_url or not password:
+            return
+
+        self.cf_quota_active_refreshing = True
+
+        def worker():
+            try:
+                data = self._cf_quota_login_and_query(backend_url, "", password)
+                accounts = data.get("accounts", [])
+                with self.cf_schedule_lock:
+                    active_account = int(getattr(self, "cf_current_account", 6) or 6)
+                idx = active_account - 1
+                if 0 <= idx < len(accounts):
+                    item = accounts[idx] or {}
+                    used = int(item.get("todayUsed", 0) or 0)
+                    remain = int(item.get("todayRemaining", 0) or 0)
+                    limit = int(item.get("todayLimit", 0) or 0)
+                    def apply():
+                        if self.closing or self.cf_quota_dialog is not dialog:
+                            return
+                        if idx < len(self.cf_quota_rows):
+                            row = self.cf_quota_rows[idx]
+                            row["requests"].set(f"{used:,}")
+                            row["remain"].set(f"{remain:,}")
+                            row["limit"].set(f"{limit:,}")
+                    self.root.after(0, apply)
+            except Exception:
+                pass
+            finally:
+                self.cf_quota_active_refreshing = False
+                if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog:
+                    try:
+                        self.cf_quota_active_refresh_after_id = dialog.after(
+                            1000,
+                            lambda: self._refresh_cf_active_row(dialog, backend_url, password)
+                            if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog
+                            else None
+                        )
+                    except Exception:
+                        self.cf_quota_active_refresh_after_id = None
+
     def open_cf_quota_manager(self):
         """六账户额度配置：直接覆盖主IP列表区域，不创建浮动窗口。"""
         # 两个配置页互斥：打开 CF 配置前，先自动返回 IP 主窗口。
@@ -3769,6 +3816,19 @@ class NirSoftCFScanner:
                 total_var.set("")
 
             self.cf_quota_refreshing = False
+
+            # 当前正在使用的 SNI 单独快速刷新：每 1 秒更新该账户的今日请求/今日剩余。
+            # 六账户完整刷新仍保持原来的 5 秒周期。
+            try:
+                if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog:
+                    self.cf_quota_active_refresh_after_id = dialog.after(
+                        1000,
+                        lambda: self._refresh_cf_active_row(dialog, backend_url, password)
+                        if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog
+                        else None
+                    )
+            except Exception:
+                self.cf_quota_active_refresh_after_id = None
 
             # 自动刷新：记录 after ID；关闭窗口时会明确取消，避免返回后又触发一次登录。
             if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog:
