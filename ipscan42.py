@@ -1240,6 +1240,8 @@ class NirSoftCFScanner:
                         if isinstance(info, dict):
                             snis = [str(x).strip() for x in (info.get("snis") or []) if str(x).strip()]
                         display_lines.append(",".join(dict.fromkeys(snis)))
+                    if shared_uuid:
+                        display_lines.append(shared_uuid)
 
                     self.config_sni_uuid_entry.config(state="normal")
                     self.config_sni_uuid_entry.delete("1.0", "end")
