@@ -1209,16 +1209,13 @@ class NirSoftCFScanner:
                         self.save_node_configs_file()
                     self.config_index = min(self.config_index, len(self.node_configs) - 1)
 
+                    # 不弹“一个账户成功”之类的干扰窗口；结果直接显示在 SNI 文本框。
+                    # 只有存在失败账户时才提示，成功获取的域名无需额外弹窗。
                     failed = [f"账户{i + 1}：{error}" for i, info, error in results if info is None]
                     if failed:
                         messagebox.showwarning(
-                            "自动获取完成",
-                            f"账户1公共 UUID 已获取；SNI 已获取 {success_count}/6 个账户。\n\n" + "\n".join(failed)
-                        )
-                    else:
-                        messagebox.showinfo(
-                            "自动获取完成",
-                            "已获取账户1公共 UUID，并发现六个子账户的 SNI/域名。\n结果已自动保存。"
+                            "自动获取部分失败",
+                            f"SNI 已获取 {success_count}/6 个账户。\n\n" + "\n".join(failed)
                         )
                 finally:
                     try:
