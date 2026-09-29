@@ -77,6 +77,7 @@ class NirSoftCFScanner:
         self.node_configs = []
         self.config_index = 0
         self.config_mode = False
+        self.config_readonly = False
         self.saved_subnets = ""
         self.saved_ports = ""
         self.saved_workers = ""
@@ -85,6 +86,9 @@ class NirSoftCFScanner:
         self.cf_quota_accounts = self.load_cf_quota_config()
         self.cf_quota_refreshing = False
         self.cf_quota_dialog = None
+        self.cf_quota_logged_in = False
+        self.cf_quota_login_key = None
+        self.cf_quota_refresh_after_id = None
         self.cf_quota_rows = []
         self.cf_schedule_mode = str(self.cf_quota_accounts.get("schedule_mode", "balance")).lower()
         if self.cf_schedule_mode not in ("balance", "drain"):
@@ -112,6 +116,7 @@ class NirSoftCFScanner:
             self.subnet_entry.insert(0, self.saved_subnets)
 
         self.root.after(80, self.update_results)
+        self.root.after(300, self._keep_ip_scrollbar_visible)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def setup_styles(self):
@@ -182,24 +187,6 @@ class NirSoftCFScanner:
             command=self.clear_scan_list
         )
         self.clear_button.pack(side="left", padx=(0, 5))
-
-        # 新增：上传到 CF
-        self.upload_button = ttk.Button(
-            top,
-            text="上传到 CF",
-            width=9,
-            command=self.upload_to_cf
-        )
-        self.upload_button.pack(side="left", padx=(0, 5))
-
-        # CF 账户管理
-        self.account_button = ttk.Button(
-            top,
-            text="CF账户",
-            width=8,
-            command=self.open_cf_account_manager
-        )
-        self.account_button.pack(side="left")
 
         # 六账户 Workers 请求额度
         self.quota_button = ttk.Button(
@@ -335,12 +322,13 @@ class NirSoftCFScanner:
             cfg_subnet_frame, width=62, height=6, wrap="none",
             font=("Consolas", 10), undo=True
         )
-        self.config_subnet_entry.pack(side="left", fill="both", expand=True)
+        self.config_subnet_entry.grid(row=0, column=0, sticky="nsew")
+        # IP框内部右侧嵌入式上下滚动条：不额外占用文本框外部宽度。
         cfg_subnet_scroll = ttk.Scrollbar(
             cfg_subnet_frame, orient="vertical",
             command=self.config_subnet_entry.yview
         )
-        cfg_subnet_scroll.pack(side="right", fill="y")
+        cfg_subnet_scroll.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
         self.config_subnet_entry.configure(yscrollcommand=cfg_subnet_scroll.set)
         self._subnet_placeholder_active = False
         self.config_subnet_entry.bind("<FocusIn>", self._config_subnet_focus_in)
@@ -462,7 +450,6 @@ class NirSoftCFScanner:
         self.xray_stop_event.set()
         self.force_stop_all_xray()
         self.force_stop_xray()
-        self.upload_button.config(state="normal")
         self.save_scan_checkpoint()
         self.update_status()
 
@@ -567,7 +554,6 @@ class NirSoftCFScanner:
         self.xray_stop_event.set()
         self.force_stop_all_xray()
         self.force_stop_xray()
-        self.upload_button.config(state="normal")
         self.start_button.config(text="开始")
         self.set_inputs_state(True)
         self.resume_available = False
@@ -828,9 +814,6 @@ class NirSoftCFScanner:
 
         self.start_button.config(text="暂停")
         self.set_inputs_state(False)
-
-        self.upload_button.config(state="disabled")
-
         self.update_scan_timer()
 
         self.update_status()
@@ -1134,12 +1117,37 @@ class NirSoftCFScanner:
             pass
         return "break"
 
+    def _keep_ip_scrollbar_visible(self):
+        """保持主界面 IP/网段文本框滚动条稳定可见；不参与扫描逻辑。"""
+        try:
+            sb = getattr(self, "config_subnet_scrollbar", None)
+            txt = getattr(self, "config_subnet_entry", None)
+            if sb is not None and txt is not None and sb.winfo_exists() and txt.winfo_exists():
+                sb.grid(row=0, column=1, sticky="ns")
+                txt.grid(row=0, column=0, sticky="nsew")
+                parent = txt.master
+                parent.grid_rowconfigure(0, weight=1)
+                parent.grid_columnconfigure(0, weight=1)
+        except Exception:
+            pass
+        try:
+            self.root.after(500, self._keep_ip_scrollbar_visible)
+        except Exception:
+            pass
+
     def open_node_config(self):
-        if self.running:
-            messagebox.showinfo("提示", "扫描进行中，请先停止扫描再修改配置。")
-            return
+        # 两个配置页互斥：打开扫描配置前，先自动关闭 CF 配置页。
+        try:
+            if self.cf_quota_dialog is not None and self.cf_quota_dialog.winfo_exists():
+                if self.quota_button.cget("text") == "返回":
+                    self.quota_button.invoke()
+        except Exception:
+            pass
+
+        readonly = bool(self.running)
 
         # 进入配置页时，把主窗口当前输入同步进去。
+        # 扫描进行中允许查看配置，但全部控件只读，不允许修改。
         # 网段支持逗号或换行分隔，进入配置页统一显示为“一行一个网段”。
         subnet_text = self.subnet_entry.get().strip()
         subnet_lines = [x.strip() for x in subnet_text.replace("\n", ",").split(",") if x.strip()]
@@ -1159,18 +1167,41 @@ class NirSoftCFScanner:
             entry.insert(0, value)
 
         self.config_mode = True
+        self.config_readonly = readonly
         self._config_show_current()
+
+        # 扫描中：配置页仅供查看，控件全部灰色不可编辑。
+        entry_state = "disabled" if readonly else "normal"
+        self.config_port_entry.config(state=entry_state)
+        self.config_worker_entry.config(state=entry_state)
+        self.config_subnet_entry.config(state="disabled" if readonly else "normal")
+        self.config_sni_uuid_entry.config(state="disabled" if readonly else "normal")
+
         self.config_overlay.place(x=0, y=0, relwidth=1.0, relheight=1.0)
         self.config_overlay.lift()
         self.config_button.config(text="返回", command=self.close_node_config)
 
     def close_node_config(self):
-        # 返回时自动保存当前配置；配置页不再提供单独的“保存”按钮。
-        self.config_save()
+        # 扫描中只是查看配置，返回时绝对不保存/修改任何配置。
+        if not getattr(self, "config_readonly", False):
+            self.config_save()
+
+        # 恢复控件可编辑状态，供下一次停止扫描后的配置使用。
+        self.config_port_entry.config(state="normal")
+        self.config_worker_entry.config(state="normal")
+        self.config_subnet_entry.config(state="normal")
+        self.config_sni_uuid_entry.config(state="normal")
+
+        # 返回统一回到 IP 主窗口，不进入其他配置页面。
         self.config_overlay.place_forget()
         self.config_mode = False
+        self.config_readonly = False
         self.tree.lift()
-        self.config_button.config(text="配置", command=self.open_node_config)
+        self.config_button.config(text="扫描配置", command=self.open_node_config)
+        try:
+            self.quota_button.config(text="CF配置", command=self.open_cf_quota_manager)
+        except Exception:
+            pass
 
     def config_prev(self):
         self._config_read_current()
@@ -2885,8 +2916,6 @@ class NirSoftCFScanner:
 
     def _cf_quota_login_and_query(self, backend_url, username, password, progress_callback=None):
         """登录账户1后台，然后由账户1后台统一返回账户1~6额度。"""
-        if progress_callback:
-            progress_callback("正在登录账户1后台……")
         backend_url = self._normalize_cf_quota_backend_url(backend_url)
         if not backend_url:
             raise RuntimeError("请先填写额度后台地址")
@@ -2898,36 +2927,42 @@ class NirSoftCFScanner:
             urllib.request.HTTPCookieProcessor(cookie_jar)
         )
 
-        # 当前 workers.js 的 /login 按原 CF账户按钮方式只提交 password。
-        # 登录名仅作为界面兼容字段，不参与实际登录请求。
-        login_data = urllib.parse.urlencode({
-            "password": password,
-        }).encode("utf-8")
+        # 同一个后台地址 + 密码在本次程序运行期间只登录一次。
+        # 返回再进入额度页面时直接复用已登录状态，不再重复调用 /login。
+        login_key = (backend_url, password)
+        if not self.cf_quota_logged_in or self.cf_quota_login_key != login_key:
+            # 当前 workers.js 的 /login 按原 CF账户按钮方式只提交 password。
+            # 登录名仅作为界面兼容字段，不参与实际登录请求。
+            login_data = urllib.parse.urlencode({
+                "password": password,
+            }).encode("utf-8")
 
-        login_request = urllib.request.Request(
-            backend_url + "/login",
-            data=login_data,
-            method="POST",
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-                "User-Agent": "CF-IP-Scanner/1.0",
-            },
-        )
+            login_request = urllib.request.Request(
+                backend_url + "/login",
+                data=login_data,
+                method="POST",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                    "User-Agent": "CF-IP-Scanner/1.0",
+                },
+            )
 
-        with opener.open(login_request, timeout=15) as response:
-            login_body = response.read().decode("utf-8-sig", errors="replace")
+            with opener.open(login_request, timeout=15) as response:
+                login_body = response.read().decode("utf-8-sig", errors="replace")
 
-        try:
-            login_json = json.loads(login_body)
-        except Exception:
-            login_json = {}
+            try:
+                login_json = json.loads(login_body)
+            except Exception:
+                login_json = {}
 
-        if not login_json.get("success"):
-            raise RuntimeError("额度后台登录失败，请检查后台地址和密码")
+            if not login_json.get("success"):
+                self.cf_quota_logged_in = False
+                self.cf_quota_login_key = None
+                raise RuntimeError("额度后台登录失败，请检查后台地址和密码")
 
-        if progress_callback:
-            progress_callback("登录成功，正在读取账户1~6额度……")
+            self.cf_quota_logged_in = True
+            self.cf_quota_login_key = login_key
 
         usage_request = urllib.request.Request(
             backend_url + "/admin/get6AccountUsage?mode=" + urllib.parse.quote(self.cf_schedule_mode),
@@ -2980,13 +3015,18 @@ class NirSoftCFScanner:
         if not isinstance(accounts, list) or len(accounts) != 6:
             raise RuntimeError("后台没有返回完整的账户1~6数据")
 
-        if progress_callback:
-            progress_callback("登录成功，六账户额度读取完成")
 
         return data
 
     def open_cf_quota_manager(self):
         """六账户额度配置：直接覆盖主IP列表区域，不创建浮动窗口。"""
+        # 两个配置页互斥：打开 CF 配置前，先自动返回 IP 主窗口。
+        try:
+            if getattr(self, "config_mode", False):
+                self.close_node_config()
+        except Exception:
+            pass
+
         if self.cf_quota_dialog is not None and self.cf_quota_dialog.winfo_exists():
             self.cf_quota_dialog.lift()
             return
@@ -3051,10 +3091,18 @@ class NirSoftCFScanner:
         ).grid(row=2, column=1, sticky="w", pady=(2, 6))
 
         login_status_var = tk.StringVar(value="登录状态：未登录")
-        ttk.Label(
+        login_status_label = ttk.Label(
             form,
             textvariable=login_status_var
-        ).grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(2, 6))
+        )
+        login_status_label.grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(2, 6))
+        def set_login_status(text, logged_in=False):
+            login_status_var.set("登录状态：" + text)
+            try:
+                login_status_label.configure(foreground="#000000" if logged_in else "#d00000")
+            except Exception:
+                pass
+        set_login_status("已登录" if self.cf_quota_logged_in else "未登录", self.cf_quota_logged_in)
 
         table = ttk.Frame(frame)
         table.pack(fill="both", expand=True)
@@ -3101,8 +3149,8 @@ class NirSoftCFScanner:
         bottom = ttk.Frame(frame)
         bottom.pack(fill="x", pady=(10, 0))
 
-        total_var = tk.StringVar(value="总请求：—    总剩余：—")
-        ttk.Label(bottom, textvariable=total_var).pack(side="left")
+        total_var = tk.StringVar(value="")
+        ttk.Label(bottom, textvariable=total_var, width=34).pack(side="left")
 
         schedule_mode_var = tk.BooleanVar(value=self.cf_schedule_mode == "drain")
         schedule_mode_text = tk.StringVar(value="放干模式" if schedule_mode_var.get() else "平衡模式")
@@ -3140,13 +3188,41 @@ class NirSoftCFScanner:
         ttk.Label(reserve_box, text="%").pack(side="left")
 
         def on_close():
-            self.cf_quota_dialog = None
+            # 先把入口恢复，再清理当前页面。这样连续“CF配置→返回”时，
+            # 即使后台刷新线程刚好回调，也不会把按钮重新绑定到旧页面。
+            self.quota_button.config(text="CF配置", command=self.open_cf_quota_manager)
+
+            # 先失效当前页面引用，所有旧刷新回调都会被身份检查拦截。
+            if self.cf_quota_dialog is dialog:
+                self.cf_quota_dialog = None
             self.cf_quota_refreshing = False
-            dialog.destroy()
-            self.quota_button.config(
-                text="CF配置",
-                command=self.open_cf_quota_manager
-            )
+
+            try:
+                if self.cf_quota_refresh_after_id is not None:
+                    dialog.after_cancel(self.cf_quota_refresh_after_id)
+            except Exception:
+                pass
+            self.cf_quota_refresh_after_id = None
+
+            # 立即隐藏 CF 页面，保证马上回到 IP 主窗口。
+            try:
+                dialog.place_forget()
+            except Exception:
+                pass
+            try:
+                self.config_overlay.place_forget()
+                self.config_mode = False
+                self.config_readonly = False
+                self.tree.lift()
+            except Exception:
+                pass
+
+            # 延后一拍销毁旧页面，避免当前 Tk 回调链中途销毁自身造成
+            # 连续点击时出现“返回失效”。
+            try:
+                dialog.after_idle(lambda: dialog.destroy() if dialog.winfo_exists() else None)
+            except Exception:
+                pass
         self.quota_button.config(text="返回", command=on_close)
 
         refresh_button = ttk.Button(bottom, text="刷新额度", width=11)
@@ -3191,6 +3267,9 @@ class NirSoftCFScanner:
                 messagebox.showerror("错误", "额度后台配置保存失败。", parent=dialog)
 
         def refresh():
+            if self.cf_quota_dialog is not dialog:
+                return
+            self.cf_quota_refresh_after_id = None
             if self.cf_quota_refreshing:
                 return
 
@@ -3214,14 +3293,9 @@ class NirSoftCFScanner:
 
             self.cf_quota_refreshing = True
             refresh_button.config(state="disabled")
-            login_status_var.set("登录状态：正在登录……")
-            total_var.set("正在连接账户1后台并读取账户1~6……")
-            for row in self.cf_quota_rows:
-                row["status"].set("读取中…")
-                row["requests"].set("—")
-                row["remain"].set("—")
-                row["limit"].set("—")
 
+            # 刷新时保留当前表格内容，不清空、不显示“读取中…”。
+            # 新数据返回后直接覆盖对应数值。
             def progress_callback(message):
                 if dialog.winfo_exists():
                     try:
@@ -3231,7 +3305,7 @@ class NirSoftCFScanner:
 
             threading.Thread(
                 target=self._refresh_cf_quota_worker,
-                args=(dialog, refresh_button, total_var, backend_url, username, password, progress_callback, login_status_var),
+                args=(dialog, refresh_button, total_var, backend_url, username, password, progress_callback, login_status_var, login_status_label),
                 daemon=True
             ).start()
 
@@ -3243,7 +3317,7 @@ class NirSoftCFScanner:
 
     def _refresh_cf_quota_worker(
         self, dialog, refresh_button, total_var,
-        backend_url, username, password, progress_callback=None, login_status_var=None
+        backend_url, username, password, progress_callback=None, login_status_var=None, login_status_label=None
     ):
         try:
             data = self._cf_quota_login_and_query(
@@ -3267,6 +3341,15 @@ class NirSoftCFScanner:
             total_requests = None
             total_remaining = None
 
+        def set_login_status(text, logged_in=False):
+            if login_status_var is not None:
+                login_status_var.set("登录状态：" + text)
+            if login_status_label is not None:
+                try:
+                    login_status_label.configure(foreground="#000000" if logged_in else "#d00000")
+                except Exception:
+                    pass
+
         def apply_results():
             if self.closing:
                 return
@@ -3277,10 +3360,8 @@ class NirSoftCFScanner:
                 row = self.cf_quota_rows[i]
 
                 if error:
+                    # 读取失败时保留原来的数值，只更新状态。
                     row["status"].set("读取失败")
-                    row["requests"].set("—")
-                    row["remain"].set("—")
-                    row["limit"].set("—")
                     continue
 
                 row["name"].set(f"账户{i + 1}")
@@ -3293,30 +3374,31 @@ class NirSoftCFScanner:
                 self._set_cf_schedule(getattr(self, "_last_cf_quota_data", {}))
             if total_requests is None:
                 error_text = next((x[4] for x in results if x[4]), "未知错误")
-                login_status_var.set(f"登录状态：失败 — {error_text}") if login_status_var is not None else None
-                total_var.set("连接失败，请检查后台地址 / 登录信息")
+                error_lower = str(error_text).lower()
+                if "登录失败" in str(error_text) or "http 401" in error_lower or "http 403" in error_lower:
+                    self.cf_quota_logged_in = False
+                    self.cf_quota_login_key = None
+                    set_login_status("未登录", False)
+                total_var.set("")
             else:
-                if login_status_var is not None:
-                    login_status_var.set("登录状态：已登录 ✓")
-                total_var.set(
-                    f"总请求：{total_requests:,}    总剩余：{total_remaining:,}"
-                )
+                set_login_status("已登录", True)
+                total_var.set("")
 
             self.cf_quota_refreshing = False
             if refresh_button.winfo_exists():
                 refresh_button.config(state="normal")
 
-            # 自动刷新：只在窗口仍存在时继续。
-            if dialog.winfo_exists() and not self.closing:
+            # 自动刷新：记录 after ID；关闭窗口时会明确取消，避免返回后又触发一次登录。
+            if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog:
                 try:
-                    dialog.after(
+                    self.cf_quota_refresh_after_id = dialog.after(
                         CF_QUOTA_REFRESH_SECONDS * 1000,
                         lambda: refresh_button.invoke()
-                        if dialog.winfo_exists() and not self.cf_quota_refreshing
+                        if dialog.winfo_exists() and not self.cf_quota_refreshing and self.cf_quota_dialog is dialog
                         else None
                     )
                 except Exception:
-                    pass
+                    self.cf_quota_refresh_after_id = None
 
         if dialog.winfo_exists():
             self.root.after(0, apply_results)
@@ -3611,8 +3693,6 @@ class NirSoftCFScanner:
 
         if not password:
             return
-
-        self.upload_button.config(state="disabled")
         self.lbl_progress.config(
             text=f"正在上传 {len(nodes)} 个节点到 CF..."
         )
@@ -3705,8 +3785,6 @@ class NirSoftCFScanner:
             )
 
     def _upload_success(self, count):
-        self.upload_button.config(state="normal")
-
         self.update_status()
 
         # 上传成功属于正常提示，不占用 Xray 错误状态区域。
@@ -3715,8 +3793,6 @@ class NirSoftCFScanner:
         )
 
     def _upload_failed(self, error):
-        self.upload_button.config(state="normal")
-
         self.update_status()
 
         messagebox.showerror(
@@ -3800,4 +3876,6 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = NirSoftCFScanner(root)
     root.mainloop()
+
+
 
