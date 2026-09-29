@@ -111,7 +111,15 @@ export default {
 					const cookieOK = !!authCookie && authCookie === await MD5MD5(UA + 加密秘钥 + 管理员密码);
 					const headerOK = headerPassword === (typeof 管理员密码 === 'string' ? 管理员密码.replace(/[\r\n]/g, '') : 管理员密码);
 					// 管理客户端可使用密码请求头，浏览器原有Cookie登录仍然兼容。
-					if (!cookieOK && !headerOK) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
+					if (!cookieOK && !headerOK) {
+						if (访问路径.startsWith('admin/') && request.headers.get('Accept')?.includes('application/json')) {
+							return new Response(JSON.stringify({ success: false, error: '管理员密码验证失败' }), {
+								status: 401,
+								headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' }
+							});
+						}
+						return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
+					}
 					if (访问路径 === 'admin/get6workerinfo') {// 自动发现六账户 Worker 地址并读取候选域名
 						if (request.method !== 'GET') return new Response('Method Not Allowed', { status: 405 });
 						try {
