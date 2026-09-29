@@ -3097,7 +3097,7 @@ class NirSoftCFScanner:
         table.pack(fill="both", expand=True)
 
         headers = ["账户", "今日请求", "今日剩余", "状态", "UUID", "SNI"]
-        widths = [12, 18, 18, 16, 38, 34]
+        widths = [8, 12, 12, 8, 34, 20]
         for col, (title, width) in enumerate(zip(headers, widths)):
             ttk.Label(
                 table, text=title, anchor="center", width=width
