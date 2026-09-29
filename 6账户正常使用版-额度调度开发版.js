@@ -730,6 +730,7 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 	let order = [];
 	let selectedAccount = null;
 	let rotationState = null;
+	let rotationChanged = false;
 
 	if (normalizedMode === 'drain') {
 		// 放干模式：账户1先保留自己的预留额度；随后 6 → 5 → 4 → 3 → 2 依次放干。
@@ -741,8 +742,8 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		if (selectedAccount) order = [selectedAccount];
 	} else {
 		// 平衡模式：真正按轮换块切换，而不是每次都固定选账户1。
-		// 当前账户达到本轮 rotationChunk 后，切换到下一个仍高于保留线的账户。
-		// 账户1同样参与轮换；一旦剩余达到其保留线，就自动退出轮换。
+		// 当前账户达到本轮轮换额度后，切换到下一个仍高于保留线的账户。
+		// 账户1同样参与轮换；一旦剩余达到其保留线，就退出轮换。
 		const eligible = cycle.filter(account => {
 			const item = enriched[account - 1];
 			return item && item.todayRemaining > item.reserve;
@@ -765,6 +766,7 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 					startUsed: item.todayUsed,
 					targetUsed: Math.min(item.todayLimit - item.reserve, item.todayUsed + item.rotationChunk)
 				};
+				rotationChanged = true;
 			} else {
 				const current = Number(rotationState.account);
 				const item = enriched[current - 1];
@@ -785,18 +787,15 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 							startUsed: nextItem.todayUsed,
 							targetUsed: Math.min(nextItem.todayLimit - nextItem.reserve, nextItem.todayUsed + nextItem.rotationChunk)
 						};
+						rotationChanged = true;
 					}
 				} else {
 					selectedAccount = current;
 				}
 			}
 
-			if (env.KV && typeof env.KV.put === 'function' && rotationState) {
-				// 只在轮换状态发生变化时写入，避免高频请求连续写同一个 KV key。
-				const stateText = JSON.stringify(rotationState);
-				if (!savedRotationStateEqual(rotationKey, stateText, rotationState)) {
-					try { await env.KV.put(rotationKey, stateText); } catch (e) { }
-				}
+			if (env.KV && typeof env.KV.put === 'function' && rotationChanged && rotationState) {
+				try { await env.KV.put(rotationKey, JSON.stringify(rotationState)); } catch (e) { }
 			}
 			if (selectedAccount) order = [selectedAccount];
 		}
@@ -818,10 +817,6 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		order,
 		accounts: enriched
 	};
-}
-
-function savedRotationStateEqual(rotationKey, stateText, state) {
-	return false;
 }
 
 const HPACKHuffman码长 = [
