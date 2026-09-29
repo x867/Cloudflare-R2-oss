@@ -815,7 +815,8 @@ async function get6AccountWorkerNodeInfo(env) {
 			const probeErrors = [];
 			for (const candidate of unique.slice(0, 30)) {
 				try {
-					const probe = await fetch(String(candidate.url), {
+					const probeUrl = String(candidate.url).replace(/\/+$/, '') + '/admin/nodeinfo';
+					const probe = await fetch(probeUrl, {
 						method: 'GET',
 						headers: {
 							'Accept': 'application/json',
