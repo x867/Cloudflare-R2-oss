@@ -753,12 +753,19 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		if (selectedAccount) order = [selectedAccount];
 	} else {
 		// 平衡模式：
-		// 账户1保留10%（可配置），账户2~6各保留5%（可配置）。
-		// 不再按“谁剩余最多”排序，避免某一个账户长期被优先消耗。
-		// 返回固定轮换队列，由扫描软件逐个启动 Xray 时平均轮换。
-		order = cycle.filter(account => {
+		// 账户1保留 reserve1%，账户2~6各保留 reserveOther%。
+		// 所有仍有“可用余额”的账户都参与轮换；优先把使用率较低的账户排在前面，
+		// 因此账户1如果当前请求较少、额度富余，就会继续参与轮换，而不是固定退出。
+		// 同一使用率时保持 1→6→5→4→3→2 的稳定顺序。
+		const eligible = cycle.filter(account => {
 			const item = enriched[account - 1];
 			return item && item.todayRemaining > item.reserve;
+		});
+		order = eligible.slice().sort((a, b) => {
+			const ar = enriched[a - 1]?.usedRatio ?? 1;
+			const br = enriched[b - 1]?.usedRatio ?? 1;
+			if (ar !== br) return ar - br;
+			return cycle.indexOf(a) - cycle.indexOf(b);
 		});
 		selectedAccount = order[0] || null;
 	}
