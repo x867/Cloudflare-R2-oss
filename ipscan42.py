@@ -1274,11 +1274,11 @@ class NirSoftCFScanner:
                 old_order = list(self.cf_schedule_order)
                 old_pos = self.cf_schedule_pos
                 self.cf_schedule_order = order
-                if self.cf_schedule_mode == "balance" and old_order:
-                    # 刷新额度时尽量保持当前轮换位置；如果当前账户已退出，则从新队列头开始。
-                    current_account = old_order[old_pos % len(old_order)] if old_pos < len(old_order) else None
-                    if current_account in order:
-                        self.cf_schedule_pos = order.index(current_account)
+                if self.cf_schedule_mode == "balance":
+                    # Worker 的 selectedAccount 是最新额度比较后的权威起点。
+                    # 每次刷新后都从 Worker 当前选中的账户开始，避免旧账户继续被使用。
+                    if selected_account in order:
+                        self.cf_schedule_pos = order.index(selected_account)
                     else:
                         self.cf_schedule_pos = 0
                 else:
