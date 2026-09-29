@@ -1149,9 +1149,10 @@ class NirSoftCFScanner:
                     info = None
                     error = str(item.get("error") or "").strip()
 
-                    # 账户2~5可以直接使用 nodeinfo；账户1有多个域名、账户6有内部 workers.dev，
-                    # 因此账户1和账户6与2~5一样，优先走 candidates 发现流程。
-                    if account not in (1, 6):
+                    # 账户2~6和账户1一样，先按后台直接返回的 nodeinfo 获取。
+                    # 账户6不要因为 Worker 本身是 workers.dev 就放弃 nodeinfo；
+                    # 外部 SNI 如果已在 nodeinfo.snis 中，直接取出来。
+                    if account != 1:
                         direct = item.get("nodeinfo")
                         if isinstance(direct, dict):
                             raw_snis = direct.get("snis") if isinstance(direct.get("snis"), list) else []
@@ -1159,6 +1160,8 @@ class NirSoftCFScanner:
                             snis = list(dict.fromkeys([str(x).strip() for x in raw_snis if str(x).strip()]))
                             if direct_sni and direct_sni not in snis:
                                 snis.insert(0, direct_sni)
+                            if account == 6:
+                                snis = [x for x in snis if not x.lower().endswith(".workers.dev")]
                             if snis:
                                 info = {"snis": snis}
 
