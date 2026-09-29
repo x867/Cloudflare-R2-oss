@@ -92,7 +92,7 @@ class NirSoftCFScanner:
         self.cf_reserve_account1 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_account1", 10) or 10)))
         self.cf_reserve_accounts2_6 = max(0, min(100, int(self.cf_quota_accounts.get("reserve_accounts2_6", 5) or 5)))
         self.cf_rotation_percent = max(1, min(100, int(self.cf_quota_accounts.get("rotation_percent", 10) or 10)))
-        self.cf_schedule_order = [1, 2, 3, 4, 5, 6]
+        # 默认从账户6开始轮换，账户1只在仍高于保留线时参与\n        self.cf_schedule_order = [6, 5, 4, 3, 2, 1]
         self.cf_schedule_pos = 0
         self.cf_schedule_lock = threading.Lock()
         self.cf_schedule_poll_stop = threading.Event()
@@ -1261,7 +1261,7 @@ class NirSoftCFScanner:
                     # 回退时也保持与 Worker 一致的固定轮换顺序：
                     # 账户1 → 6 → 5 → 4 → 3 → 2。
                     # 只要账户高于自己的保留线，就参与轮换。
-                    cycle = [1, 6, 5, 4, 3, 2]
+                    cycle = [6, 5, 4, 3, 2, 1]
                     order = [
                         account for account in cycle
                         for item_account, remain, reserve in enriched
