@@ -704,28 +704,75 @@ async function get6AccountWorkerNodeInfo(env) {
 			continue;
 		}
 		try {
-			const candidates = [];
-			// 优先读取已绑定的自定义 Worker 域名。
-			const domains = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/domains', token, '账户' + (i + 1) + ' Worker 域名读取失败');
-			for (const item of (Array.isArray(domains?.result) ? domains.result : [])) {
-				const hostname = String(item?.hostname || '').trim();
-				if (hostname) candidates.push({ url: 'https://' + hostname, hostname, source: 'workers-domain', service: String(item?.service || '') });
+			// 先验证“这个 Token 是否真的属于当前账户且仍然有效”。
+			const verify = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/tokens/verify', token, '账户' + (i + 1) + ' Token 验证失败');
+			const tokenStatus = String(verify?.result?.status || '').trim();
+			if (tokenStatus && tokenStatus !== 'active') {
+				throw new Error('账户' + (i + 1) + ' Token 状态：' + tokenStatus);
 			}
-			// 如果没有自定义域名，再尝试 workers.dev。
-			if (!candidates.length) {
-				const subdomain = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/subdomain', token, '账户' + (i + 1) + ' Workers 子域名读取失败');
-				const sub = String(subdomain?.result?.subdomain || '').trim();
-				if (sub) {
-					const scripts = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/scripts', token, '账户' + (i + 1) + ' Worker 列表读取失败');
-					for (const script of (Array.isArray(scripts?.result) ? scripts.result : [])) {
-						const name = String(script?.id || '').trim();
-						if (name) candidates.push({ url: 'https://' + name + '.' + sub + '.workers.dev', hostname: name + '.' + sub + '.workers.dev', source: 'workers-dev', service: name });
-					}
+
+			const candidates = [];
+			let subdomain = '';
+			let scripts = [];
+			let domainError = '';
+
+			// 先走最稳定的 Script 列表 + workers.dev 子域。
+			try {
+				const sub = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/subdomain', token, '账户' + (i + 1) + ' Workers 子域名读取失败');
+				subdomain = String(sub?.result?.subdomain || '').trim();
+			} catch (e) {
+				domainError = e?.message || String(e);
+			}
+
+			try {
+				const list = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/scripts', token, '账户' + (i + 1) + ' Worker 列表读取失败');
+				scripts = Array.isArray(list?.result) ? list.result : [];
+			} catch (e) {
+				if (!domainError) domainError = e?.message || String(e);
+			}
+
+			if (subdomain && scripts.length) {
+				for (const script of scripts) {
+					const name = String(script?.id || '').trim();
+					if (name) candidates.push({
+						url: 'https://' + name + '.' + subdomain + '.workers.dev',
+						hostname: name + '.' + subdomain + '.workers.dev',
+						source: 'workers-dev',
+						service: name
+					});
 				}
 			}
-			results.push({ account: i + 1, success: candidates.length > 0, candidates: candidates.slice(0, 20), error: candidates.length ? '' : '未找到可用 Worker 域名' });
+
+			// 自定义域名独立查询；即使这一项失败，也保留 workers.dev 候选。
+			try {
+				const domains = await fetchJSON(API_BASE + encodeURIComponent(accountId) + '/workers/domains', token, '账户' + (i + 1) + ' Worker 域名读取失败');
+				for (const item of (Array.isArray(domains?.result) ? domains.result : [])) {
+					const hostname = String(item?.hostname || '').trim();
+					if (hostname) candidates.unshift({
+						url: 'https://' + hostname,
+						hostname,
+						source: 'workers-domain',
+						service: String(item?.service || '')
+					});
+				}
+			} catch (e) {
+				if (!domainError) domainError = e?.message || String(e);
+			}
+
+			results.push({
+				account: i + 1,
+				success: candidates.length > 0,
+				tokenStatus: tokenStatus || 'active',
+				candidates: candidates.slice(0, 20),
+				error: candidates.length ? '' : (domainError || '未找到可用 Worker 域名')
+			});
 		} catch (err) {
-			results.push({ account: i + 1, success: false, candidates: [], error: err?.message || String(err) });
+			results.push({
+				account: i + 1,
+				success: false,
+				candidates: [],
+				error: err?.message || String(err)
+			});
 		}
 	}
 	return { success: true, accountCount: 6, accounts: results };
