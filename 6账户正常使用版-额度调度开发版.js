@@ -696,7 +696,7 @@ async function 获取六账户调度(env, mode = '', usageOverride = null) {
 		? Math.min(100, Math.max(1, Number(cfg.rotationPercent))) : 10;
 
 	// 主账户1参与平衡轮换；备用账户轮换顺序固定为 6 → 5 → 4 → 3 → 2。
-	const cycle = [1, 6, 5, 4, 3, 2];
+	const cycle = [6, 5, 4, 3, 2, 1];
 	const todayKey = new Date().toISOString().slice(0, 10);
 	const rotationKey = 'cf_6_account_rotation_v1';
 
