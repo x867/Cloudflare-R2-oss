@@ -1186,6 +1186,18 @@ class NirSoftCFScanner:
                             ni = self._fetch_worker_nodeinfo(url, password)
                             candidate_sni = str(ni.get("sni") or "").strip()
                             candidate_sni = re.sub(r"^https?://", "", candidate_sni, flags=re.I).split("/", 1)[0].strip()
+                            # 账户6访问内部 workers.dev 后，继续读取 nodeinfo 中的外部 SNI 列表。
+                            if account == 6 and isinstance(ni.get("snis"), list):
+                                external_snis = []
+                                for value in ni.get("snis"):
+                                    value = re.sub(r"^https?://", "", str(value or "").strip(), flags=re.I).split("/", 1)[0].strip()
+                                    if not value or value.lower().endswith(".workers.dev"):
+                                        continue
+                                    if value not in external_snis:
+                                        external_snis.append(value)
+                                if external_snis:
+                                    info = {"snis": external_snis}
+                                    break
                             if candidate_sni.lower().endswith(".workers.dev"):
                                 continue
                             if account == 1 and candidate_sni.lower() == "cvx.ccwu.cc":
