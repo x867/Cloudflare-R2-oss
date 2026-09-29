@@ -1274,11 +1274,11 @@ class NirSoftCFScanner:
                 old_order = list(self.cf_schedule_order)
                 old_pos = self.cf_schedule_pos
                 self.cf_schedule_order = order
-                if self.cf_schedule_mode == "balance":
-                    # Worker 的 selectedAccount 是最新额度比较后的权威起点。
-                    # 每次刷新后都从 Worker 当前选中的账户开始，避免旧账户继续被使用。
-                    if selected_account in order:
-                        self.cf_schedule_pos = order.index(selected_account)
+                if self.cf_schedule_mode == "balance" and old_order:
+                    # 刷新额度时尽量保持当前轮换位置；如果当前账户已退出，则从新队列头开始。
+                    current_account = old_order[old_pos % len(old_order)] if old_pos < len(old_order) else None
+                    if current_account in order:
+                        self.cf_schedule_pos = order.index(current_account)
                     else:
                         self.cf_schedule_pos = 0
                 else:
@@ -1381,11 +1381,19 @@ class NirSoftCFScanner:
             return
         self.cf_quota_active_account = account
 
-        # 调度选择可能来自 Xray 工作线程；这里绝不直接调用 Tkinter。
-        # Tkinter 从后台线程调用 root.after 可能阻塞主界面，导致点击“开始”后窗口无响应。
-        # 统一通过结果队列交给主线程 update_results() 更新界面。
+        def apply():
+            if self.closing:
+                return
+            for i, row in enumerate(self.cf_quota_rows):
+                active = (i + 1) == account
+                row["name"].set(f"● 账户{i + 1}" if active else f"账户{i + 1}")
+                try:
+                    row["name_label"].configure(foreground="#008000" if active else "#333333")
+                except Exception:
+                    pass
+
         try:
-            self.result_queue.put(("cf_active_account", account))
+            self.root.after(0, apply)
         except Exception:
             pass
 
@@ -2603,22 +2611,6 @@ class NirSoftCFScanner:
                 break
 
             if not msg:
-                continue
-
-            if msg[0] == "cf_active_account":
-                try:
-                    account = int(msg[1])
-                    for i, row in enumerate(self.cf_quota_rows):
-                        active = (i + 1) == account
-                        row["name"].set(f"● 账户{i + 1}" if active else f"账户{i + 1}")
-                        try:
-                            row["name_label"].configure(
-                                foreground="#008000" if active else "#333333"
-                            )
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
                 continue
 
             if msg[0] == "ip_done":
@@ -3894,6 +3886,3 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = NirSoftCFScanner(root)
     root.mainloop()
-
-
-
