@@ -3029,32 +3029,17 @@ class NirSoftCFScanner:
         backend_entry = ttk.Entry(form, textvariable=backend_var, width=58)
         backend_entry.grid(row=0, column=1, columnspan=3, sticky="ew", pady=4)
 
-        ttk.Label(form, text="登录名：").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
-        username_var = tk.StringVar(value=self.cf_quota_accounts.get("username", ""))
-        username_entry = ttk.Entry(form, textvariable=username_var, width=24)
-        username_entry.grid(row=1, column=1, sticky="w", pady=4)
+        # 登录名 / 密码不在 CF 额度页面显示，继续使用已保存的后台登录配置。
+        username = str(self.cf_quota_accounts.get("username", "")).strip()
+        password = str(self.cf_quota_accounts.get("password", "")).strip()
 
-        ttk.Label(form, text="密码：").grid(row=1, column=2, sticky="e", padx=(12, 6), pady=4)
-        password_var = tk.StringVar(
-            value=self.cf_quota_accounts.get("password", "")
-            if self.cf_quota_accounts.get("remember")
-            else ""
+        login_status_var = tk.StringVar(value="未登录")
+        login_status_label = ttk.Label(
+            form,
+            textvariable=login_status_var,
+            foreground="#d00000"
         )
-        password_entry = ttk.Entry(form, textvariable=password_var, width=24, show="*")
-        password_entry.grid(row=1, column=3, sticky="w", pady=4)
-
-        remember_var = tk.BooleanVar(value=bool(self.cf_quota_accounts.get("remember")))
-        ttk.Checkbutton(
-            form,
-            text="保存登录信息",
-            variable=remember_var
-        ).grid(row=2, column=1, sticky="w", pady=(2, 6))
-
-        login_status_var = tk.StringVar(value="登录状态：未登录")
-        ttk.Label(
-            form,
-            textvariable=login_status_var
-        ).grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(2, 6))
+        login_status_label.grid(row=1, column=1, columnspan=3, sticky="w", padx=(0, 0), pady=(4, 6))
 
         table = ttk.Frame(frame)
         table.pack(fill="both", expand=True)
@@ -3115,7 +3100,7 @@ class NirSoftCFScanner:
                 target=self._sync_cf_schedule_to_worker,
                 args=(
                     backend_var.get().strip(),
-                    password_var.get(),
+                    password,
                     self.cf_schedule_mode,
                     self.cf_reserve_account1,
                     self.cf_reserve_accounts2_6,
@@ -3147,9 +3132,9 @@ class NirSoftCFScanner:
         def save_config():
             config = {
                 "backend_url": backend_var.get().strip().rstrip("/"),
-                "username": username_var.get().strip(),
-                "password": password_var.get(),
-                "remember": bool(remember_var.get()),
+                "username": username,
+                "password": password,
+                "remember": bool(password),
                 "schedule_mode": self.cf_schedule_mode,
                 "reserve_account1": self.cf_reserve_account1,
                 "reserve_accounts2_6": self.cf_reserve_accounts2_6,
@@ -3173,8 +3158,6 @@ class NirSoftCFScanner:
                     ),
                     daemon=True
                 ).start()
-                if not config["remember"]:
-                    password_var.set("")
                 messagebox.showinfo("提示", "额度后台配置已保存，调度设置正在同步。", parent=dialog)
             else:
                 messagebox.showerror("错误", "额度后台配置保存失败。", parent=dialog)
@@ -3184,26 +3167,27 @@ class NirSoftCFScanner:
                 return
 
             backend_url = backend_var.get().strip().rstrip("/")
-            username = username_var.get().strip()
-            password = password_var.get()
 
             if not backend_url:
                 messagebox.showwarning("提示", "请先填写额度后台地址。", parent=dialog)
                 return
             if not password:
-                messagebox.showwarning("提示", "请先填写后台密码。", parent=dialog)
+                login_status_var.set("未登录")
+                login_status_label.configure(foreground="#d00000")
+                messagebox.showwarning("提示", "当前没有保存后台登录信息，请先配置登录信息。", parent=dialog)
                 return
 
             self.cf_quota_accounts = {
                 "backend_url": backend_url,
                 "username": username,
-                "password": password if remember_var.get() else "",
-                "remember": bool(remember_var.get()),
+                "password": password,
+                "remember": True,
             }
 
             self.cf_quota_refreshing = True
             refresh_button.config(state="disabled")
-            login_status_var.set("登录状态：正在登录……")
+            login_status_var.set("未登录")
+            login_status_label.configure(foreground="#d00000")
             total_var.set("正在连接账户1后台并读取账户1~6……")
             for row in self.cf_quota_rows:
                 row["status"].set("读取中…")
@@ -3214,7 +3198,7 @@ class NirSoftCFScanner:
             def progress_callback(message):
                 if dialog.winfo_exists():
                     try:
-                        dialog.after(0, lambda m=message: login_status_var.set("登录状态：" + m))
+                        dialog.after(0, lambda m=message: None)
                     except Exception:
                         pass
 
@@ -3282,11 +3266,14 @@ class NirSoftCFScanner:
                 self._set_cf_schedule(getattr(self, "_last_cf_quota_data", {}))
             if total_requests is None:
                 error_text = next((x[4] for x in results if x[4]), "未知错误")
-                login_status_var.set(f"登录状态：失败 — {error_text}") if login_status_var is not None else None
+                if login_status_var is not None:
+                    login_status_var.set("未登录")
+                    login_status_label.configure(foreground="#d00000")
                 total_var.set("连接失败，请检查后台地址 / 登录信息")
             else:
                 if login_status_var is not None:
-                    login_status_var.set("登录状态：已登录 ✓")
+                    login_status_var.set("已登录")
+                    login_status_label.configure(foreground="#008000")
                 total_var.set(
                     f"总请求：{total_requests:,}    总剩余：{total_remaining:,}"
                 )
