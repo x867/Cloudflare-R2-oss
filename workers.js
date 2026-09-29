@@ -37,10 +37,10 @@ export default {
 		const host = hosts[0];
 		const 访问路径 = url.pathname.slice(1).toLowerCase();
 		// 自动识别接口：直接返回当前 Worker 的 UUID/SNI，不经过管理员登录验证。
-		if (访问路径 === 'admin/nodeinfo' && request.method === 'GET') {
-			return new Response(JSON.stringify({ success: true, uuid: userID, sni: host, hosts }), {
+		if ((访问路径 === 'admin/nodeinfo' || 访问路径 === 'admin/nodeinfo/') && request.method === 'GET') {
+			return new Response(JSON.stringify({ success: true, version: 'nodeinfo-v2', uuid: userID, sni: host, host: url.hostname, hosts }), {
 				status: 200,
-				headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store' }
+				headers: { 'Content-Type': 'application/json;charset=utf-8', 'Cache-Control': 'no-store, no-cache, must-revalidate' }
 			});
 		}
 
