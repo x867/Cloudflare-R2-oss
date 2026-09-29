@@ -1381,19 +1381,11 @@ class NirSoftCFScanner:
             return
         self.cf_quota_active_account = account
 
-        def apply():
-            if self.closing:
-                return
-            for i, row in enumerate(self.cf_quota_rows):
-                active = (i + 1) == account
-                row["name"].set(f"● 账户{i + 1}" if active else f"账户{i + 1}")
-                try:
-                    row["name_label"].configure(foreground="#008000" if active else "#333333")
-                except Exception:
-                    pass
-
+        # 调度选择可能来自 Xray 工作线程；这里绝不直接调用 Tkinter。
+        # Tkinter 从后台线程调用 root.after 可能阻塞主界面，导致点击“开始”后窗口无响应。
+        # 统一通过结果队列交给主线程 update_results() 更新界面。
         try:
-            self.root.after(0, apply)
+            self.result_queue.put(("cf_active_account", account))
         except Exception:
             pass
 
@@ -2611,6 +2603,22 @@ class NirSoftCFScanner:
                 break
 
             if not msg:
+                continue
+
+            if msg[0] == "cf_active_account":
+                try:
+                    account = int(msg[1])
+                    for i, row in enumerate(self.cf_quota_rows):
+                        active = (i + 1) == account
+                        row["name"].set(f"● 账户{i + 1}" if active else f"账户{i + 1}")
+                        try:
+                            row["name_label"].configure(
+                                foreground="#008000" if active else "#333333"
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 continue
 
             if msg[0] == "ip_done":
