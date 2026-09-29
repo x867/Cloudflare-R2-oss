@@ -1155,10 +1155,22 @@ class NirSoftCFScanner:
                         if snis:
                             info = {"snis": snis}
 
-                    # 账户1优先使用已经取得的 nodeinfo；其他账户只尝试读取 SNI。
+                    # 优先直接使用后台返回的 hostname/domain；这就是该账户的 SNI。
+                    # 不再要求再次访问 /admin/nodeinfo 才允许写入文本框。
                     for candidate in candidates:
                         if info and info.get("snis"):
                             break
+                        if isinstance(candidate, dict):
+                            direct_snis = []
+                            for key in ("sni", "hostname", "host", "domain", "domainName", "worker", "workerDomain"):
+                                value = str(candidate.get(key) or "").strip()
+                                if value:
+                                    value = re.sub(r"^https?://", "", value, flags=re.I).split("/", 1)[0].strip()
+                                    if value and value not in direct_snis:
+                                        direct_snis.append(value)
+                            if direct_snis:
+                                info = {"snis": direct_snis}
+                                break
                         url = str(candidate.get("url") or candidate.get("hostname") or "").strip() if isinstance(candidate, dict) else str(candidate or "").strip()
                         if not url:
                             continue
@@ -1227,14 +1239,7 @@ class NirSoftCFScanner:
                     self.config_index = min(self.config_index, len(self.node_configs) - 1)
                     self._config_highlight_line()
 
-                    # 不弹“一个账户成功”之类的干扰窗口；结果直接显示在 SNI 文本框。
-                    # 只有存在失败账户时才提示，成功获取的域名无需额外弹窗。
-                    failed = [f"账户{i + 1}：{error}" for i, info, error in results if info is None]
-                    if failed:
-                        messagebox.showwarning(
-                            "自动获取部分失败",
-                            f"SNI 已获取 {success_count}/6 个账户。\n\n" + "\n".join(failed)
-                        )
+                    # 自动获取只更新界面，不弹成功/失败窗口，避免干扰用户操作。
                 finally:
                     try:
                         self.config_auto_fetch_button.config(state="normal")
