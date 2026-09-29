@@ -1109,6 +1109,19 @@ class NirSoftCFScanner:
                     error = str(item.get("error") or "").strip()
                     tried = []
 
+                    # 优先使用账户1后台已经直接读取到的 UUID/SNI。
+                    # 这样不再要求扫描软件用账户1密码登录账户2~6的 Worker。
+                    direct = item.get("nodeinfo")
+                    if isinstance(direct, dict):
+                        direct_uuid = str(direct.get("uuid") or "").strip()
+                        direct_sni = str(direct.get("sni") or "").strip()
+                        if direct_uuid and direct_sni:
+                            info = {
+                                "uuid": direct_uuid,
+                                "sni": direct_sni,
+                                "worker_url": str(direct.get("workerUrl") or "").strip()
+                            }
+
                     # workers.dev 和外部自定义域名都可以作为 EdgeTunnel 入口。
                     # 不再依赖候选顺序：逐个尝试，任何一个能返回 /admin/nodeinfo
                     # 的地址都算成功。这样即使第一个地址是 workers.dev，
