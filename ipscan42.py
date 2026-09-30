@@ -2355,7 +2355,9 @@ class NirSoftCFScanner:
                 except Exception:
                     pass
                 try:
-                    # IPv4 / IPv6 测试结束后都清理临时 Xray 日志。                except Exception:
+                    if log_path and os.path.isfile(log_path):
+                        os.remove(log_path)
+                except Exception:
                     pass
 
     def stop_process(self, p):
