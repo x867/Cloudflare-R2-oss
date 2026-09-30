@@ -2616,7 +2616,7 @@ class NirSoftCFScanner:
                 except Exception:
                     pass
 
-    def test_vless_real_ping(self, socks_port=None, ipv6=False):
+    def test_vless_real_ping(self, socks_port=None):
         """Xray real latency test aligned with v2rayN:
         establish SOCKS proxy once, then perform two HTTP requests on the same
         proxy connection and use the lower result. The measured interval starts
@@ -2627,12 +2627,7 @@ class NirSoftCFScanner:
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # IPv6 节点 RTT 较高时，不能沿用 IPv4 的 3.5 秒总超时。
-            # IPv4 保持原值，避免影响现有扫描速度。
-            proxy_timeout = 8.0 if ipv6 else 3.5
-            handshake_timeout = 5.0 if ipv6 else 2.0
-            http_timeout = 8.0 if ipv6 else 3.5
-            sock.settimeout(proxy_timeout)
+            sock.settimeout(3.5)
 
             if socks_port is None:
                 socks_port = self.xray_port
@@ -2641,7 +2636,7 @@ class NirSoftCFScanner:
 
             # SOCKS5 no-auth negotiation.
             sock.sendall(b"\x05\x01\x00")
-            reply = self.recv_exact(sock, 2, handshake_timeout)
+            reply = self.recv_exact(sock, 2, 2.0)
             if reply != b"\x05\x00":
                 return None, False
 
@@ -2654,7 +2649,7 @@ class NirSoftCFScanner:
             )
             sock.sendall(request)
 
-            reply = self.recv_exact(sock, 4, handshake_timeout)
+            reply = self.recv_exact(sock, 4, 3.0)
             if (
                 reply is None
                 or len(reply) != 4
@@ -2665,14 +2660,14 @@ class NirSoftCFScanner:
 
             atyp = reply[3]
             if atyp == 1:
-                remain = self.recv_exact(sock, 6, handshake_timeout)
+                remain = self.recv_exact(sock, 6, 2.0)
             elif atyp == 3:
-                length_data = self.recv_exact(sock, 1, handshake_timeout)
+                length_data = self.recv_exact(sock, 1, 2.0)
                 if not length_data:
                     return None, False
-                remain = self.recv_exact(sock, length_data[0] + 2, handshake_timeout)
+                remain = self.recv_exact(sock, length_data[0] + 2, 2.0)
             elif atyp == 4:
-                remain = self.recv_exact(sock, 18, handshake_timeout)
+                remain = self.recv_exact(sock, 18, 2.0)
             else:
                 return None, False
 
@@ -2698,7 +2693,7 @@ class NirSoftCFScanner:
                 # normally no body, so header completion is enough and avoids
                 # waiting for an artificial body/connection close.
                 header = bytearray()
-                deadline = time.perf_counter() + http_timeout
+                deadline = time.perf_counter() + 3.5
                 while b"\r\n\r\n" not in header:
                     remaining = deadline - time.perf_counter()
                     if remaining <= 0:
