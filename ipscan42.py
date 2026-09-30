@@ -2155,12 +2155,9 @@ class NirSoftCFScanner:
             except Exception:
                 target_is_ipv6 = False
 
-            # Xray 的 sockopt / domainStrategy 放在 streamSettings 下。
-            # IPv6 候选使用独立的 ForceIPv6，IPv4 保持原有配置不变。
-            if target_is_ipv6:
-                sockopt = stream.setdefault("sockopt", {})
-                sockopt["domainStrategy"] = "ForceIPv6"
-
+            # 目标地址已经是明确的 IPv6 字面量，不需要额外设置 ForceIPv6。
+            # 避免把后续代理目标（例如 gstatic）也强制解析为 IPv6，
+            # 保持与正常 V2rayN 节点测试更接近。
             tls = stream.get("tlsSettings")
             if isinstance(tls, dict):
                 tls.pop("allowInsecure", None)
