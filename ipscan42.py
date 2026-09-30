@@ -2178,10 +2178,9 @@ class NirSoftCFScanner:
             except Exception:
                 target_is_ipv6 = False
 
-            # sockopt 属于 outbound 层，不属于 streamSettings。
-            # 放错层会导致 Xray 配置加载失败。
+            # 只有 IPv6 候选使用 IPv6 专用路由设置，IPv4 不添加任何 IPv6 参数。
             if target_is_ipv6:
-                sockopt = outbounds[0].setdefault("sockopt", {})
+                sockopt = stream.setdefault("sockopt", {})
                 sockopt["domainStrategy"] = "ForceIPv6"
 
             tls = stream.get("tlsSettings")
@@ -2253,9 +2252,14 @@ class NirSoftCFScanner:
                     print("IPv6 Xray 启动失败，保留日志:", log_path)
                 return None, False
 
-            xray_result = self.test_vless_real_ping(socks_port, ipv6=target_is_ipv6)
-            if target_is_ipv6 and not xray_result[1]:
-                print("IPv6 Xray 实测失败，保留日志:", log_path)
+            # IPv4 完全沿用原来的 Xray 实测调用，不进入 IPv6 专用分支。
+            # IPv6 才使用放宽后的超时参数。
+            if target_is_ipv6:
+                xray_result = self.test_vless_real_ping(socks_port, ipv6=True)
+                if not xray_result[1]:
+                    print("IPv6 Xray 实测失败，保留日志:", log_path)
+            else:
+                xray_result = self.test_vless_real_ping(socks_port)
             return xray_result
 
         except Exception as e:
