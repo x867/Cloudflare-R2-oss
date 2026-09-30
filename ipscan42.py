@@ -2328,8 +2328,16 @@ class NirSoftCFScanner:
             return [str(target.network_address)]
 
         sample_count = min(max_ipv6_hosts, max(1, last - first))
-        values = random.sample(range(first + 1, last + 1), sample_count)
-        return [str(ipaddress.IPv6Address(v)) for v in values]
+        # Python 的 random.sample(range(...)) 对 2^64 / 2^128 级别的 range
+        # 可能触发 OverflowError，因此这里按主机位随机生成偏移。
+        host_count = last - first
+        values = set()
+        while len(values) < sample_count:
+            values.add(random.getrandbits(host_count.bit_length() - 1))
+        return [
+            str(ipaddress.IPv6Address(first + 1 + offset))
+            for offset in values
+        ]
 
     def _get_physical_ipv4_interfaces(self):
         """
