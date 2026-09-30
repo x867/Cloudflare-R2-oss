@@ -345,7 +345,8 @@ class NirSoftCFScanner:
             cfg_subnet_frame, orient="vertical",
             command=self.config_subnet_entry.yview
         )
-        cfg_subnet_scroll.grid(row=0, column=1, sticky="ns")
+        cfg_subnet_scroll.place(relx=1.0, rely=0.0, x=-1, relheight=1.0, anchor="ne")
+        cfg_subnet_scroll.lift()
         self.config_subnet_entry.configure(yscrollcommand=cfg_subnet_scroll.set)
         self._subnet_placeholder_active = False
         self.config_subnet_entry.bind("<FocusIn>", self._config_subnet_focus_in)
@@ -379,7 +380,8 @@ class NirSoftCFScanner:
             cfg_text_frame, orient="vertical",
             command=self.config_sni_uuid_entry.yview
         )
-        cfg_text_scroll.grid(row=0, column=1, sticky="ns")
+        cfg_text_scroll.place(relx=1.0, rely=0.0, x=-1, relheight=1.0, anchor="ne")
+        cfg_text_scroll.lift()
         self.config_sni_uuid_entry.configure(yscrollcommand=cfg_text_scroll.set)
         self._sni_uuid_placeholder_active = False
         self.config_sni_uuid_entry.bind("<FocusIn>", self._config_sni_uuid_focus_in)
