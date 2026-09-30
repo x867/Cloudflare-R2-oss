@@ -2053,6 +2053,7 @@ class NirSoftCFScanner:
                     self.ip_scan_states[ip] = {
                         "pending": len(tcp_successes),
                         "ports": [],
+                        "tcp_successes": list(tcp_successes),
                         "best_delay": None,
                         "best_tcp": None,
                     }
@@ -3148,6 +3149,20 @@ class NirSoftCFScanner:
                             state["best_tcp"],
                             state["best_delay"]
                         )
+                    elif state.get("tcp_successes"):
+                        # TCP 已经确认端口可连，但 Xray 实测失败时也保留到主列表，
+                        # 方便定位 IPv6 / Xray 问题；这类节点不会被“可用节点”复制功能当作 Xray 成功节点。
+                        tcp_candidates = sorted(
+                            state["tcp_successes"],
+                            key=lambda x: x[1]
+                        )
+                        self.success += 1
+                        self._display_ip_result(
+                            ip,
+                            [x[0] for x in tcp_candidates],
+                            tcp_candidates[0][1],
+                            None
+                        )
                     self.ip_scan_states.pop(ip, None)
                     self.completed_ips.add(ip)
                     self.save_scan_checkpoint()
@@ -3171,15 +3186,16 @@ class NirSoftCFScanner:
             "测速"
         )
 
+        row_tag = "good" if xray_delay is not None else "fail"
         if not self.tree.exists(ip):
             self.tree.insert(
-                "", "end", iid=ip, values=values, tags=("good",)
+                "", "end", iid=ip, values=values, tags=(row_tag,)
             )
         else:
             old = list(self.tree.item(ip)["values"])
             speed = old[4] if len(old) >= 5 else "测速"
             values = values[:4] + (speed,)
-            self.tree.item(ip, values=values, tags=("good",))
+            self.tree.item(ip, values=values, tags=(row_tag,))
 
     def update_status(self):
         if self.running:
