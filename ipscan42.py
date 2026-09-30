@@ -1807,11 +1807,9 @@ class NirSoftCFScanner:
         self.xray_stop_event.clear()
 
         try:
-            creationflags = getattr(
-                subprocess,
-                "CREATE_NO_WINDOW",
-                0
-            )
+            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0)
+            if os.name == "nt":
+                creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
             startupinfo = None
             if os.name == "nt":
                 startupinfo = subprocess.STARTUPINFO()
@@ -2035,7 +2033,9 @@ class NirSoftCFScanner:
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=4, ensure_ascii=False)
 
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0)
+            if os.name == "nt":
+                creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
             startupinfo = None
             if os.name == "nt":
                 startupinfo = subprocess.STARTUPINFO()
@@ -2808,7 +2808,9 @@ class NirSoftCFScanner:
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
 
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        creationflags = getattr(subprocess, "DETACHED_PROCESS", 0)
+        if os.name == "nt":
+            creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
         startupinfo = None
         if os.name == "nt":
             startupinfo = subprocess.STARTUPINFO()
