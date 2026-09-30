@@ -82,6 +82,14 @@ class NirSoftCFScanner:
         self.saved_subnets = ""
         self.saved_ports = ""
         self.saved_workers = ""
+        # 主窗口表头宽度持久化，单位为像素。
+        self.column_widths = {
+            "ip": 175,
+            "ports": 185,
+            "tcp": 135,
+            "xray": 145,
+            "speed": 145,
+        }
 
         # Cloudflare 六账户额度读取配置。Token 不写入代码，首次使用时在“CF额度”中填写。
         self.cf_quota_accounts = self.load_cf_quota_config()
@@ -267,11 +275,17 @@ class NirSoftCFScanner:
                 command=lambda c=col: self.sort_by_column(c)
             )
 
-        self.tree.column("ip", width=175, anchor="center")
-        self.tree.column("ports", width=185, anchor="center")
-        self.tree.column("tcp", width=135, anchor="center")
-        self.tree.column("xray", width=145, anchor="center")
-        self.tree.column("speed", width=145, anchor="center")
+        for col, default_width in self.column_widths.items():
+            self.tree.column(
+                col,
+                width=int(default_width),
+                minwidth=60,
+                anchor="center",
+                stretch=True
+            )
+
+        # 拖动表头分隔线后立即保存，重启软件仍保持当前列宽。
+        self.tree.bind("<ButtonRelease-1>", self._save_column_widths_after_drag, add="+")
 
         # Treeview 占满整个“文本框”区域；
         # 滚动条覆盖在最右侧边缘，视觉上属于文本框内部。
@@ -972,6 +986,16 @@ class NirSoftCFScanner:
                 self.saved_subnets = parser.get("Scan", "subnets", fallback="").strip()
                 self.saved_ports = parser.get("Scan", "ports", fallback="").strip()
                 self.saved_workers = parser.get("Scan", "workers", fallback="").strip()
+
+                # 读取上次用户拖动后的主窗口表头宽度。
+                for col, default_width in self.column_widths.items():
+                    try:
+                        width = parser.getint("UI", f"column_{col}", fallback=default_width)
+                        if 60 <= width <= 1000:
+                            self.column_widths[col] = width
+                    except Exception:
+                        pass
+
                 sections = []
                 for section in parser.sections():
                     low = section.lower()
@@ -1027,6 +1051,29 @@ class NirSoftCFScanner:
             }
         with open(self.config_file, "w", encoding="utf-8") as f:
             parser.write(f)
+
+    def _save_column_widths_after_drag(self, event=None):
+        """保存主窗口 Treeview 当前表头宽度。"""
+        try:
+            changed = False
+            for col in ("ip", "ports", "tcp", "xray", "speed"):
+                width = int(self.tree.column(col, "width"))
+                if 60 <= width <= 1000:
+                    if self.column_widths.get(col) != width:
+                        self.column_widths[col] = width
+                        changed = True
+            if changed:
+                parser = configparser.ConfigParser()
+                if os.path.isfile(self.config_file):
+                    parser.read(self.config_file, encoding="utf-8")
+                if not parser.has_section("UI"):
+                    parser.add_section("UI")
+                for col, width in self.column_widths.items():
+                    parser.set("UI", f"column_{col}", str(int(width)))
+                with open(self.config_file, "w", encoding="utf-8") as f:
+                    parser.write(f)
+        except Exception as e:
+            print("保存表头宽度失败:", e)
 
     def _set_subnet_placeholder(self):
         """网段文本框为空时显示浅色使用提示；提示文字不参与保存。"""
@@ -4623,6 +4670,8 @@ class NirSoftCFScanner:
 
     def on_close(self, event=None):
         self.closing = True
+        # 关闭软件前再保存一次，确保最后一次拖动表头也不会丢失。
+        self._save_column_widths_after_drag()
         if self.running:
             self.pause_scan()
         else:
