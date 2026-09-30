@@ -2516,7 +2516,10 @@ class NirSoftCFScanner:
             is_ipv6 = ip_obj.version == 6
             family = socket.AF_INET6 if is_ipv6 else socket.AF_INET
             sock = socket.socket(family, socket.SOCK_STREAM)
-            sock.settimeout(0.8)
+            # IPv6 节点的实际公网 RTT 可能明显高于 IPv4。
+            # IPv4 保持原来的 0.8 秒，不影响现有扫描速度；
+            # IPv6 单独放宽到 3 秒，避免“V2能连、扫描器却判失败”。
+            sock.settimeout(3.0 if is_ipv6 else 0.8)
 
             if os.name == "nt" and not is_ipv6:
                 # IPv4 保留现有出口选择机制；IPv6 不走这里。
