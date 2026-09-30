@@ -20,7 +20,7 @@ import re
 
 # ============================================================
 # Cloudflare & 第三方节点 IP 优选工具
-# 扫描停止与 Xray 停止彻底分离版
+# IPv4 / IPv6 双栈扫描；扫描停止与 Xray 停止彻底分离版
 # 新增：上传 Xray 成功节点到 CF /admin/ADD.txt
 # ============================================================
 
@@ -742,11 +742,7 @@ class NirSoftCFScanner:
             gathered_ips = []
             try:
                 for part in parts:
-                    network = ipaddress.ip_network(part, strict=False)
-                    hosts = [str(ip) for ip in network.hosts()]
-                    if not hosts and network.num_addresses == 1:
-                        hosts = [str(network.network_address)]
-                    gathered_ips.extend(hosts)
+                    gathered_ips.extend(self._expand_scan_network(part))
                 if not gathered_ips:
                     raise ValueError
             except Exception:
@@ -2299,6 +2295,42 @@ class NirSoftCFScanner:
             except Exception:
                 pass
 
+    def _expand_scan_network(self, value, max_ipv6_hosts=4096):
+        """展开扫描目标，支持 IPv4 / IPv6 双栈。
+
+        IPv4 保持原来的完整展开方式。
+        IPv6 对很大的网段采用随机抽样，避免 /64 之类前缀被展开成天文数字。
+        单个 IPv6 地址始终只扫描该地址。
+        """
+        value = str(value).strip()
+        if not value:
+            return []
+
+        target = ipaddress.ip_network(value, strict=False)
+        if target.version == 4:
+            hosts = [str(ip) for ip in target.hosts()]
+            if not hosts and target.num_addresses == 1:
+                hosts = [str(target.network_address)]
+            return hosts
+
+        # IPv6：小网段完整扫描，大网段随机抽样。
+        if target.num_addresses <= max_ipv6_hosts:
+            hosts = [str(ip) for ip in target.hosts()]
+            if not hosts and target.num_addresses == 1:
+                hosts = [str(target.network_address)]
+            return hosts
+
+        # /64 等超大 IPv6 网段不能完整展开。
+        # 抽样范围避开全 0 网络地址，最多生成 max_ipv6_hosts 个唯一地址。
+        first = int(target.network_address)
+        last = int(target.broadcast_address)
+        if last <= first:
+            return [str(target.network_address)]
+
+        sample_count = min(max_ipv6_hosts, max(1, last - first))
+        values = random.sample(range(first + 1, last + 1), sample_count)
+        return [str(ipaddress.IPv6Address(v)) for v in values]
+
     def _get_physical_ipv4_interfaces(self):
         """
         Windows 下获取可用于直连公网的本机 IPv4/接口索引。
@@ -2460,27 +2492,23 @@ class NirSoftCFScanner:
         return None
 
     def test_tcp(self, ip, port):
-        """
-        Windows 直连 TCP 延迟测试。
+        """Windows 直连 TCP 延迟测试，支持 IPv4 / IPv6 双栈。
 
-        关键区别：
-        1. 不调用 PowerShell。
-        2. 不做启动前网卡检测，因此不会拖慢扫描启动。
-        3. Windows 上绑定真实 IPv4，并通过 IP_UNICAST_IF 指定接口。
-        4. 使用 perf_counter_ns() 记录 0.1ms 精度。
-
-        目的不是“让数字变大”，而是避免 v2rayN TUN 抢走普通 socket 的路由。
+        IPv4 继续使用现有真实 IPv4 出口选择机制，避免 TUN/VPN 抢路由。
+        IPv6 使用 AF_INET6，由 Windows IPv6 路由选择实际出口，不绑定 IPv4 地址。
         """
         sock = None
         start_ns = time.perf_counter_ns()
 
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            ip_obj = ipaddress.ip_address(str(ip).strip())
+            is_ipv6 = ip_obj.version == 6
+            family = socket.AF_INET6 if is_ipv6 else socket.AF_INET
+            sock = socket.socket(family, socket.SOCK_STREAM)
             sock.settimeout(0.8)
 
-            # 只在 Windows 下指定真实出口接口。
-            # IP_UNICAST_IF = 31。接口索引使用 Windows 要求的网络字节序。
-            if os.name == "nt":
+            if os.name == "nt" and not is_ipv6:
+                # IPv4 保留现有出口选择机制；IPv6 不走这里。
                 iface = self._select_direct_tcp_interface()
                 if iface:
                     try:
@@ -2490,15 +2518,17 @@ class NirSoftCFScanner:
                             struct.pack("I", socket.htonl(iface["index"]))
                         )
                     except Exception as e:
-                        # 某些 Windows/驱动不支持该选项时仍然尝试绑定本地地址。
-                        print("设置 TCP 出口接口失败:", e)
+                        print("设置 TCP IPv4 出口接口失败:", e)
 
                     try:
                         sock.bind((iface["ip"], 0))
                     except Exception as e:
                         print("绑定真实 IPv4 失败:", e)
 
-            result = sock.connect_ex((ip, port))
+            if is_ipv6:
+                result = sock.connect_ex((str(ip_obj), int(port), 0, 0))
+            else:
+                result = sock.connect_ex((str(ip_obj), int(port)))
 
             elapsed_ms = (
                 time.perf_counter_ns() - start_ns
