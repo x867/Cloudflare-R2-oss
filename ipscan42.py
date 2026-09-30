@@ -2330,12 +2330,15 @@ class NirSoftCFScanner:
         sample_count = min(max_ipv6_hosts, max(1, last - first))
         # Python 的 random.sample(range(...)) 对 2^64 / 2^128 级别的 range
         # 可能触发 OverflowError，因此这里按主机位随机生成偏移。
-        host_count = last - first
+        host_bits = target.max_prefixlen - target.prefixlen
         values = set()
         while len(values) < sample_count:
-            values.add(random.getrandbits(host_count.bit_length() - 1))
+            offset = random.getrandbits(host_bits)
+            # 跳过网络地址，保留最多 max_ipv6_hosts 个唯一主机地址。
+            if offset:
+                values.add(offset)
         return [
-            str(ipaddress.IPv6Address(first + 1 + offset))
+            str(ipaddress.IPv6Address(first + offset))
             for offset in values
         ]
 
