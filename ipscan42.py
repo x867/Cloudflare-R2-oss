@@ -472,7 +472,7 @@ class NirSoftCFScanner:
         self.xray_stop_event.set()
         self.force_stop_all_xray()
         self.force_stop_xray()
-        self.save_scan_checkpoint()
+        self.save_scan_checkpoint(force=True)
         self.update_status()
 
     def clear_scan_list(self):
