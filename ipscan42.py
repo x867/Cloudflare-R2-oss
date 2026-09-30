@@ -2036,6 +2036,12 @@ class NirSoftCFScanner:
                 json.dump(config, f, indent=4, ensure_ascii=False)
 
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            startupinfo = None
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+
             log_path = os.path.join(
                 base, f"_xray_test_{socks_port}_{threading.get_ident()}.log"
             )
@@ -2043,7 +2049,8 @@ class NirSoftCFScanner:
             p = subprocess.Popen(
                 [xray_path, "run", "-c", config_path],
                 cwd=base, stdout=log_file, stderr=log_file,
-                creationflags=creationflags
+                creationflags=creationflags,
+                startupinfo=startupinfo
             )
 
             with self.xray_process_lock:
