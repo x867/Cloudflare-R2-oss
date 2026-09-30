@@ -337,13 +337,19 @@ class NirSoftCFScanner:
             cfg_subnet_frame, width=62, height=6, wrap="none",
             font=("Consolas", 10), undo=True
         )
-        self.config_subnet_entry.grid(row=0, column=0, sticky="nsew")
-        # IP框内部右侧嵌入式上下滚动条：不额外占用文本框外部宽度。
+        self.config_subnet_entry.place(
+            x=0, y=0, relwidth=1.0, relheight=1.0
+        )
+        # 滚动条覆盖在文本框最右侧，视觉上与主 IP 框一致。
         cfg_subnet_scroll = ttk.Scrollbar(
             cfg_subnet_frame, orient="vertical",
             command=self.config_subnet_entry.yview
         )
-        cfg_subnet_scroll.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
+        cfg_subnet_scroll.place(
+            relx=1.0, rely=0.0, relheight=1.0,
+            anchor="ne"
+        )
+        cfg_subnet_scroll.lift()
         self.config_subnet_entry.configure(yscrollcommand=cfg_subnet_scroll.set)
         self._subnet_placeholder_active = False
         self.config_subnet_entry.bind("<FocusIn>", self._config_subnet_focus_in)
@@ -369,10 +375,10 @@ class NirSoftCFScanner:
             cfg_text_frame, width=62, height=8, wrap="none",
             font=("Consolas", 10), undo=True
         )
-        self.config_sni_uuid_entry.pack(
-            fill="both", expand=True
+        self.config_sni_uuid_entry.place(
+            x=0, y=0, relwidth=1.0, relheight=1.0
         )
-        # 滚动条嵌入 SNI / UUID 文本框内部右侧，不再占用文本框外部空间。
+        # 滚动条覆盖在文本框最右侧，视觉上与主 IP 框一致。
         cfg_text_scroll = ttk.Scrollbar(
             cfg_text_frame, orient="vertical",
             command=self.config_sni_uuid_entry.yview
@@ -381,6 +387,7 @@ class NirSoftCFScanner:
             relx=1.0, rely=0.0, relheight=1.0,
             anchor="ne"
         )
+        cfg_text_scroll.lift()
         self.config_sni_uuid_entry.configure(yscrollcommand=cfg_text_scroll.set)
         self._sni_uuid_placeholder_active = False
         self.config_sni_uuid_entry.bind("<FocusIn>", self._config_sni_uuid_focus_in)
