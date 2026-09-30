@@ -369,12 +369,18 @@ class NirSoftCFScanner:
             cfg_text_frame, width=62, height=8, wrap="none",
             font=("Consolas", 10), undo=True
         )
-        self.config_sni_uuid_entry.pack(side="left", fill="both", expand=True)
+        self.config_sni_uuid_entry.pack(
+            fill="both", expand=True
+        )
+        # 滚动条嵌入 SNI / UUID 文本框内部右侧，不再占用文本框外部空间。
         cfg_text_scroll = ttk.Scrollbar(
             cfg_text_frame, orient="vertical",
             command=self.config_sni_uuid_entry.yview
         )
-        cfg_text_scroll.pack(side="right", fill="y")
+        cfg_text_scroll.place(
+            relx=1.0, rely=0.0, relheight=1.0,
+            anchor="ne"
+        )
         self.config_sni_uuid_entry.configure(yscrollcommand=cfg_text_scroll.set)
         self._sni_uuid_placeholder_active = False
         self.config_sni_uuid_entry.bind("<FocusIn>", self._config_sni_uuid_focus_in)
