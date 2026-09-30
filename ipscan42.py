@@ -3936,17 +3936,15 @@ class NirSoftCFScanner:
                     if results[i][4] is None:
                         remain_value = results[i][2]
                         account_no = i + 1
-                        reserve_percent = (
-                            self.cf_reserve_account1
-                            if account_no == 1
-                            else self.cf_reserve_accounts2_6
-                        )
                         limit_value = results[i][3]
-                        reserve_value = (
-                            int(limit_value * reserve_percent / 100)
-                            if limit_value is not None
-                            else 0
-                        )
+                        if account_no == 1:
+                            reserve_value = self.cf_account1_min_remaining
+                        else:
+                            reserve_value = (
+                                int(limit_value * self.cf_reserve_accounts2_6 / 100)
+                                if limit_value is not None
+                                else 0
+                            )
 
                         try:
                             if remain_value is not None and remain_value <= 0:
