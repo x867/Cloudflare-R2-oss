@@ -2147,6 +2147,17 @@ class NirSoftCFScanner:
             vnext[0]["port"] = int(target_port)
 
             stream = outbounds[0].setdefault("streamSettings", {})
+
+            # IPv6 候选 IP 必须让 Xray 明确走 IPv6。
+            # IPv4 保持 test.json 原有策略，不改变现有扫描速度/行为。
+            try:
+                target_is_ipv6 = ipaddress.ip_address(str(target_ip).strip()).version == 6
+            except Exception:
+                target_is_ipv6 = False
+            if target_is_ipv6:
+                sockopt = stream.setdefault("sockopt", {})
+                sockopt["domainStrategy"] = "ForceIPv6"
+
             tls = stream.get("tlsSettings")
             if isinstance(tls, dict):
                 tls.pop("allowInsecure", None)
@@ -2195,7 +2206,8 @@ class NirSoftCFScanner:
             with self.xray_process_lock:
                 self.xray_processes.add(p)
 
-            deadline = time.perf_counter() + 2.5
+            # IPv6 Xray 首次建连可能明显慢于 IPv4；只放宽 IPv6。
+            deadline = time.perf_counter() + (6.0 if target_is_ipv6 else 2.5)
             ready = False
             while time.perf_counter() < deadline:
                 if ((self.scan_stop_event.is_set() and not manual_retest) or p.poll() is not None):
@@ -2213,7 +2225,7 @@ class NirSoftCFScanner:
             if not ready:
                 return None, False
 
-            return self.test_vless_real_ping(socks_port)
+            return self.test_vless_real_ping(socks_port, ipv6=target_is_ipv6)
 
         except Exception as e:
             print("独立 Xray 测试失败:", e)
@@ -2563,7 +2575,7 @@ class NirSoftCFScanner:
                 except Exception:
                     pass
 
-    def test_vless_real_ping(self, socks_port=None):
+    def test_vless_real_ping(self, socks_port=None, ipv6=False):
         """Xray real latency test aligned with v2rayN:
         establish SOCKS proxy once, then perform two HTTP requests on the same
         proxy connection and use the lower result. The measured interval starts
@@ -2574,7 +2586,12 @@ class NirSoftCFScanner:
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(3.5)
+            # IPv6 节点 RTT 较高时，不能沿用 IPv4 的 3.5 秒总超时。
+            # IPv4 保持原值，避免影响现有扫描速度。
+            proxy_timeout = 8.0 if ipv6 else 3.5
+            handshake_timeout = 5.0 if ipv6 else 2.0
+            http_timeout = 8.0 if ipv6 else 3.5
+            sock.settimeout(proxy_timeout)
 
             if socks_port is None:
                 socks_port = self.xray_port
@@ -2583,7 +2600,7 @@ class NirSoftCFScanner:
 
             # SOCKS5 no-auth negotiation.
             sock.sendall(b"\x05\x01\x00")
-            reply = self.recv_exact(sock, 2, 2.0)
+            reply = self.recv_exact(sock, 2, handshake_timeout)
             if reply != b"\x05\x00":
                 return None, False
 
@@ -2596,7 +2613,7 @@ class NirSoftCFScanner:
             )
             sock.sendall(request)
 
-            reply = self.recv_exact(sock, 4, 3.0)
+            reply = self.recv_exact(sock, 4, handshake_timeout)
             if (
                 reply is None
                 or len(reply) != 4
@@ -2607,14 +2624,14 @@ class NirSoftCFScanner:
 
             atyp = reply[3]
             if atyp == 1:
-                remain = self.recv_exact(sock, 6, 2.0)
+                remain = self.recv_exact(sock, 6, handshake_timeout)
             elif atyp == 3:
-                length_data = self.recv_exact(sock, 1, 2.0)
+                length_data = self.recv_exact(sock, 1, handshake_timeout)
                 if not length_data:
                     return None, False
-                remain = self.recv_exact(sock, length_data[0] + 2, 2.0)
+                remain = self.recv_exact(sock, length_data[0] + 2, handshake_timeout)
             elif atyp == 4:
-                remain = self.recv_exact(sock, 18, 2.0)
+                remain = self.recv_exact(sock, 18, handshake_timeout)
             else:
                 return None, False
 
@@ -2640,7 +2657,7 @@ class NirSoftCFScanner:
                 # normally no body, so header completion is enough and avoids
                 # waiting for an artificial body/connection close.
                 header = bytearray()
-                deadline = time.perf_counter() + 3.5
+                deadline = time.perf_counter() + http_timeout
                 while b"\r\n\r\n" not in header:
                     remaining = deadline - time.perf_counter()
                     if remaining <= 0:
