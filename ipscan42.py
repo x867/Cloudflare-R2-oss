@@ -1661,11 +1661,15 @@ class NirSoftCFScanner:
                     if current in candidates:
                         others = [a for a in candidates if a != current]
                         if others:
-                            next_account = max(others, key=lambda a: available[a]["remain"])
-                            next_highest = available[next_account]["remain"]
-                            threshold = next_highest * (1.0 + self.cf_balance_rotation_percent / 100.0)
-                            # 当前账户进入平衡带后，真正切到下一高额度账户。
-                            self.cf_current_account = next_account if current_remain <= threshold else current
+                            # 只看当前账户“下面”的最高账户，避免 6↔5 在同一平衡带内来回跳。
+                            lower = [a for a in others if available[a]["remain"] < current_remain]
+                            if lower:
+                                next_account = max(lower, key=lambda a: available[a]["remain"])
+                                next_highest = available[next_account]["remain"]
+                                threshold = next_highest * (1.0 + self.cf_balance_rotation_percent / 100.0)
+                                self.cf_current_account = next_account if current_remain <= threshold else current
+                            else:
+                                self.cf_current_account = highest
                         else:
                             self.cf_current_account = current
                     else:
@@ -1711,10 +1715,14 @@ class NirSoftCFScanner:
         else:
             others = [(a, r) for a, r in candidates if a != current]
             if others:
-                next_account, next_remain = max(others, key=lambda x: x[1])
-                if current_remain <= next_remain * (1.0 + self.cf_balance_rotation_percent / 100.0):
-                    # 当前账户进入平衡带后，切到下一高额度账户。
-                    current = next_account
+                # 只向“额度低于当前账户”的下一档轮换，避免两个账户在同一平衡带内来回跳。
+                lower = [(a, r) for a, r in others if r < current_remain]
+                if lower:
+                    next_account, next_remain = max(lower, key=lambda x: x[1])
+                    if current_remain <= next_remain * (1.0 + self.cf_balance_rotation_percent / 100.0):
+                        current = next_account
+                else:
+                    current = highest_account
 
         self.cf_balance_remaining[current] = max(
             0, int(self.cf_balance_remaining.get(current, 0) or 0) - 1
