@@ -349,24 +349,30 @@ class NirSoftCFScanner:
         self.config_subnet_entry.bind("<FocusIn>", self._config_subnet_focus_in)
         self.config_subnet_entry.bind("<FocusOut>", self._config_subnet_focus_out)
 
-        # SNI / UUID：文本框只显示六个 SNI/域名，公共 UUID 单独显示在最后一行
+        # SNI / UUID：单独整理成“标题 + 自动获取按钮”一行，下面整块显示内容。
+        # 这样按钮和滚动条不会挤压文本框，六个 SNI + UUID 看起来更整齐。
         cfg_label("SNI / UUID", 2, 0)
-        cfg_text_frame = tk.Frame(cfg_form, bg="#f4f4f4")
-        cfg_text_frame.grid(row=2, column=1, columnspan=3, sticky="nsew", pady=6)
-        self.config_sni_uuid_entry = tk.Text(
-            cfg_text_frame, width=62, height=10, wrap="none",
-            font=("Consolas", 10), undo=True
-        )
-        self.config_sni_uuid_entry.pack(side="left", fill="both", expand=True)
+
+        cfg_sni_header = tk.Frame(cfg_form, bg="#f4f4f4")
+        cfg_sni_header.grid(row=2, column=1, columnspan=3, sticky="ew", pady=(6, 2))
         self.config_auto_fetch_button = ttk.Button(
-            cfg_text_frame,
+            cfg_sni_header,
             text="自动获取六账户",
             width=14,
             command=self.auto_fetch_six_worker_configs
         )
-        self.config_auto_fetch_button.pack(side="right", anchor="ne", padx=(4, 0), pady=(0, 2))
+        self.config_auto_fetch_button.pack(side="right")
+
+        cfg_text_frame = tk.Frame(cfg_form, bg="#f4f4f4")
+        cfg_text_frame.grid(row=3, column=1, columnspan=3, sticky="nsew", pady=(0, 6))
+        self.config_sni_uuid_entry = tk.Text(
+            cfg_text_frame, width=62, height=8, wrap="none",
+            font=("Consolas", 10), undo=True
+        )
+        self.config_sni_uuid_entry.pack(side="left", fill="both", expand=True)
         cfg_text_scroll = ttk.Scrollbar(
-            cfg_text_frame, orient="vertical", command=self.config_sni_uuid_entry.yview
+            cfg_text_frame, orient="vertical",
+            command=self.config_sni_uuid_entry.yview
         )
         cfg_text_scroll.pack(side="right", fill="y")
         self.config_sni_uuid_entry.configure(yscrollcommand=cfg_text_scroll.set)
