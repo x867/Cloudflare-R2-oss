@@ -3579,8 +3579,12 @@ class NirSoftCFScanner:
             ).start()
         mode_box = ttk.Frame(bottom)
         mode_box.pack(side="left", padx=(18, 0))
-        ttk.Checkbutton(mode_box, text="放干模式", variable=schedule_mode_var, command=on_schedule_mode_change).pack(side="left")
-        ttk.Label(mode_box, textvariable=schedule_mode_text, width=8).pack(side="left", padx=(4, 0))
+        ttk.Checkbutton(
+            mode_box,
+            textvariable=schedule_mode_text,
+            variable=schedule_mode_var,
+            command=on_schedule_mode_change
+        ).pack(side="left")
 
         reserve_box = ttk.Frame(bottom)
         reserve_box.pack(side="left", padx=(18, 0))
