@@ -2148,14 +2148,16 @@ class NirSoftCFScanner:
 
             stream = outbounds[0].setdefault("streamSettings", {})
 
-            # IPv6 候选 IP 必须让 Xray 明确走 IPv6。
-            # IPv4 保持 test.json 原有策略，不改变现有扫描速度/行为。
+            # IPv6 候选 IP 单独记录；IPv4 保持原有扫描路径。
             try:
                 target_is_ipv6 = ipaddress.ip_address(str(target_ip).strip()).version == 6
             except Exception:
                 target_is_ipv6 = False
+
+            # sockopt 属于 outbound 层，不属于 streamSettings。
+            # 放错层会导致 Xray 配置加载失败。
             if target_is_ipv6:
-                sockopt = stream.setdefault("sockopt", {})
+                sockopt = outbounds[0].setdefault("sockopt", {})
                 sockopt["domainStrategy"] = "ForceIPv6"
 
             tls = stream.get("tlsSettings")
@@ -2223,9 +2225,14 @@ class NirSoftCFScanner:
                 time.sleep(0.03)
 
             if not ready:
+                if target_is_ipv6:
+                    print("IPv6 Xray 启动失败，保留日志:", log_path)
                 return None, False
 
-            return self.test_vless_real_ping(socks_port, ipv6=target_is_ipv6)
+            xray_result = self.test_vless_real_ping(socks_port, ipv6=target_is_ipv6)
+            if target_is_ipv6 and not xray_result[1]:
+                print("IPv6 Xray 实测失败，保留日志:", log_path)
+            return xray_result
 
         except Exception as e:
             print("独立 Xray 测试失败:", e)
@@ -2267,7 +2274,13 @@ class NirSoftCFScanner:
                 except Exception:
                     pass
                 try:
-                    if 'log_path' in locals() and os.path.isfile(log_path):
+                    # IPv6 失败时保留 Xray 日志，方便定位真实原因；
+                    # 成功或 IPv4 测试仍按原逻辑清理。
+                    keep_ipv6_log = bool(locals().get("target_is_ipv6", False)) and (
+                        locals().get("ready", False) is False or
+                        locals().get("xray_result", (None, True))[1] is False
+                    )
+                    if not keep_ipv6_log and 'log_path' in locals() and os.path.isfile(log_path):
                         os.remove(log_path)
                 except Exception:
                     pass
