@@ -2155,10 +2155,10 @@ class NirSoftCFScanner:
             except Exception:
                 target_is_ipv6 = False
 
-            # sockopt 属于 outbound 层，不属于 streamSettings。
-            # 放错层会导致 Xray 配置加载失败。
+            # Xray 的 sockopt / domainStrategy 放在 streamSettings 下。
+            # IPv6 候选使用独立的 ForceIPv6，IPv4 保持原有配置不变。
             if target_is_ipv6:
-                sockopt = outbounds[0].setdefault("sockopt", {})
+                sockopt = stream.setdefault("sockopt", {})
                 sockopt["domainStrategy"] = "ForceIPv6"
 
             tls = stream.get("tlsSettings")
