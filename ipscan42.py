@@ -35,7 +35,7 @@ CF_QUOTA_REFRESH_SECONDS = 5
 class NirSoftCFScanner:
     def __init__(self, root):
         self.root = root
-        self.root.title("IP 节点优选工具 - TCP + Xray + 下载测速")
+        self.root.title("魔法探测器")
         self.root.geometry("820x520")
         self.root.minsize(680, 400)
 
