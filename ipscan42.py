@@ -2308,19 +2308,12 @@ class NirSoftCFScanner:
                 time.sleep(0.03)
 
             if not ready:
-                if target_is_ipv6:
-                    print("IPv6 Xray 启动失败，保留日志:", log_path)
                 return None, False
 
-            # IPv4 完全沿用原来的 Xray 实测调用，不进入 IPv6 专用分支。
-            # IPv6 才使用放宽后的超时参数。
+            # IPv4 / IPv6 都统一清理失败日志；IPv6 只使用专用实测超时。
             if target_is_ipv6:
-                xray_result = self.test_vless_real_ping(socks_port, ipv6=True)
-                if not xray_result[1]:
-                    print("IPv6 Xray 实测失败，保留日志:", log_path)
-            else:
-                xray_result = self.test_vless_real_ping(socks_port)
-            return xray_result
+                return self.test_vless_real_ping(socks_port, ipv6=True)
+            return self.test_vless_real_ping(socks_port)
 
         except Exception as e:
             print("独立 Xray 测试失败:", e)
@@ -2362,15 +2355,7 @@ class NirSoftCFScanner:
                 except Exception:
                     pass
                 try:
-                    # IPv6 失败时保留 Xray 日志，方便定位真实原因；
-                    # 成功或 IPv4 测试仍按原逻辑清理。
-                    keep_ipv6_log = bool(locals().get("target_is_ipv6", False)) and (
-                        locals().get("ready", False) is False or
-                        locals().get("xray_result", (None, True))[1] is False
-                    )
-                    if not keep_ipv6_log and 'log_path' in locals() and os.path.isfile(log_path):
-                        os.remove(log_path)
-                except Exception:
+                    # IPv4 / IPv6 测试结束后都清理临时 Xray 日志。                except Exception:
                     pass
 
     def stop_process(self, p):
