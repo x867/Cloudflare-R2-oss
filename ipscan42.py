@@ -1590,7 +1590,7 @@ class NirSoftCFScanner:
             messagebox.showerror("保存失败", f"无法保存配置：\n{e}")
 
     def _set_cf_schedule(self, data):
-        """更新六账户调度：放干模式严格 6→5→4→3→2→1；平衡模式按剩余额度和轮换比例动态选择。"""
+        """更新六账户额度状态。平衡模式下不重置当前账户，实际轮换统一由取节点函数决定。"""
         accounts = data.get("accounts", []) if isinstance(data, dict) else []
         fixed_order = [6, 5, 4, 3, 2, 1]
         available = {}
@@ -1609,6 +1609,7 @@ class NirSoftCFScanner:
                 if new_day or old_virtual is None:
                     virtual_remain = remain
                 else:
+                    # CF 后台统计可能延迟，本地虚拟额度只允许继续下降，不被旧统计拉高。
                     virtual_remain = min(old_virtual, remain)
 
                 self.cf_balance_reported_used[account] = used
@@ -1636,106 +1637,101 @@ class NirSoftCFScanner:
                 current = 6
 
             if self.cf_schedule_mode == "drain":
+                # 放干模式：只有当前账户跌到保留线，才切到下一个账户。
                 info = available.get(current, {})
-                if info.get("remain", 0) > info.get("reserve", 0):
-                    self.cf_current_account = current
-                else:
+                if info.get("remain", 0) <= info.get("reserve", 0):
                     start_pos = fixed_order.index(current)
                     for offset in range(1, len(fixed_order) + 1):
                         candidate = fixed_order[(start_pos + offset) % len(fixed_order)]
                         candidate_info = available.get(candidate, {})
                         if candidate_info.get("remain", 0) > candidate_info.get("reserve", 0):
-                            self.cf_current_account = candidate
+                            current = candidate
                             break
+                self.cf_current_account = current
             else:
-                candidates = [
-                    a for a in fixed_order
-                    if available.get(a, {}).get("remain", 0) > available.get(a, {}).get("reserve", 0)
-                ]
-                if candidates:
-                    ranked = sorted(candidates, key=lambda a: available[a]["remain"], reverse=True)
-                    highest = ranked[0]
-                    current_info = available.get(current, {})
-                    current_remain = current_info.get("remain", 0)
-
-                    if current in candidates:
-                        others = [a for a in candidates if a != current]
-                        if others:
-                            # 只看当前账户“下面”的最高账户，避免 6↔5 在同一平衡带内来回跳。
-                            lower = [a for a in others if available[a]["remain"] < current_remain]
-                            if lower:
-                                next_account = max(lower, key=lambda a: available[a]["remain"])
-                                next_highest = available[next_account]["remain"]
-                                threshold = next_highest * (1.0 + self.cf_balance_rotation_percent / 100.0)
-                                self.cf_current_account = next_account if current_remain <= threshold else current
-                            else:
-                                self.cf_current_account = highest
-                        else:
-                            self.cf_current_account = current
-                    else:
-                        self.cf_current_account = highest
+                # 平衡模式：这里绝不因为一次额度刷新就重选账户。
+                # 当前账户只要仍有可用额度，就保持；真正的轮换由
+                # _cf_balance_select_account() 按轮换比例决定。
+                current_info = available.get(current, {})
+                if current_info.get("remain", 0) > current_info.get("reserve", 0):
+                    self.cf_current_account = current
                 else:
-                    self.cf_current_account = max(
-                        fixed_order,
-                        key=lambda a: available.get(a, {}).get("remain", 0)
-                    )
+                    # 当前账户已经到保留线，立即找剩余最高的可用账户接替。
+                    candidates = [
+                        a for a in fixed_order
+                        if available.get(a, {}).get("remain", 0) > available.get(a, {}).get("reserve", 0)
+                    ]
+                    if candidates:
+                        self.cf_current_account = max(
+                            candidates,
+                            key=lambda a: (available[a]["remain"], -fixed_order.index(a))
+                        )
+                    else:
+                        self.cf_current_account = current
 
             self.cf_schedule_order = [self.cf_current_account]
             self.cf_schedule_pos = 0
 
     def _cf_balance_select_account(self):
-        """平衡模式实际取节点时，用本地虚拟额度抵消 CF 统计延迟，并按轮换比例切换账户。"""
+        """平衡模式实际取节点：当前账户达到轮换带后才切换，并让绿色标识同步当前账户。"""
         fixed_order = [6, 5, 4, 3, 2, 1]
-        candidates = []
+        current = int(getattr(self, "cf_current_account", 6) or 6)
+        if current not in fixed_order:
+            current = 6
 
-        for account in fixed_order:
+        def get_reserve(account):
+            if account == 1:
+                return self.cf_account1_min_remaining
+            last = getattr(self, "_last_cf_quota_data", {}) or {}
+            accounts = last.get("accounts", []) if isinstance(last, dict) else []
+            limit = int(accounts[account - 1].get("todayLimit", 0) or 0) if account - 1 < len(accounts) else 0
+            return int(limit * self.cf_reserve_accounts2_6 / 100)
+
+        def get_remain(account):
             remain = int(self.cf_balance_remaining.get(account, 0) or 0)
             if account == 1:
                 remain = min(remain, self.cf_account1_max_remaining)
-                reserve = self.cf_account1_min_remaining
-            else:
-                last = getattr(self, "_last_cf_quota_data", {}) or {}
-                accounts = last.get("accounts", []) if isinstance(last, dict) else []
-                limit = int(accounts[account - 1].get("todayLimit", 0) or 0) if account - 1 < len(accounts) else 0
-                reserve = int(limit * self.cf_reserve_accounts2_6 / 100)
+            return remain
 
-            if remain > reserve:
-                candidates.append((account, remain))
+        current_remain = get_remain(current)
+        current_reserve = get_reserve(current)
 
-        if not candidates:
-            return int(getattr(self, "cf_current_account", 6) or 6)
+        # 当前账户已经到保留线：按 6→5→4→3→2→1 找下一个可用账户。
+        if current_remain <= current_reserve:
+            start_pos = fixed_order.index(current)
+            for offset in range(1, len(fixed_order) + 1):
+                candidate = fixed_order[(start_pos + offset) % len(fixed_order)]
+                if get_remain(candidate) > get_reserve(candidate):
+                    current = candidate
+                    current_remain = get_remain(current)
+                    break
 
-        # 按剩余量从高到低排列；同额度时保持 6→5→4→3→2→1 的稳定顺序。
-        candidates.sort(key=lambda x: (-x[1], fixed_order.index(x[0])))
+        # 当前账户正常使用时，找“剩余最高”的其他账户。
+        # 只有当前额度已经进入设定的轮换百分比带，才切过去。
+        best_other = None
+        best_other_remain = -1
+        for account in fixed_order:
+            if account == current:
+                continue
+            remain = get_remain(account)
+            if remain > get_reserve(account) and remain > best_other_remain:
+                best_other = account
+                best_other_remain = remain
 
-        current = int(getattr(self, "cf_current_account", candidates[0][0]) or candidates[0][0])
-        candidate_accounts = [a for a, _ in candidates]
+        if best_other is not None and current_remain > current_reserve:
+            threshold = best_other_remain * (1.0 + self.cf_balance_rotation_percent / 100.0)
+            if current_remain <= threshold:
+                current = best_other
 
-        if current not in candidate_accounts:
-            current = candidates[0][0]
-        else:
-            current_pos = candidate_accounts.index(current)
+        # 记录本次真正使用的账户；绿色 SNI 标识也直接读取这个状态。
+        self.cf_current_account = current
+        self.cf_schedule_order = [current]
+        self.cf_schedule_pos = 0
 
-            # 当前账户不是最高额度账户时，只有它已经进入与更高账户的轮换带，
-            # 才回到更高账户；否则继续使用当前账户，避免频繁跳动。
-            if current_pos > 0:
-                higher_account, higher_remain = candidates[current_pos - 1]
-                current_remain = dict(candidates)[current]
-                if current_remain >= higher_remain * (1.0 - self.cf_balance_rotation_percent / 100.0):
-                    current = higher_account
-            else:
-                # 当前就是最高额度账户：当第二档进入轮换带时，切到第二档。
-                if len(candidates) > 1:
-                    next_account, next_remain = candidates[1]
-                    current_remain = candidates[0][1]
-                    if current_remain <= next_remain * (1.0 + self.cf_balance_rotation_percent / 100.0):
-                        current = next_account
-
-        # 本次实际选择的账户消耗一个本地虚拟请求，用来抵消 CF 后台统计延迟。
+        # 本地虚拟消耗 1 次，抵消 CF 后台统计延迟。
         self.cf_balance_remaining[current] = max(
             0, int(self.cf_balance_remaining.get(current, 0) or 0) - 1
         )
-        self.cf_current_account = current
         return current
 
     def _sync_cf_schedule_to_worker(self, backend_url, password, mode, reserve1, reserve26, rotation_percent):
