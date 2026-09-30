@@ -544,30 +544,55 @@ class NirSoftCFScanner:
         except Exception as e:
             print("读取扫描断点失败:", e)
 
-    def save_scan_checkpoint(self):
-        """保存扫描进度、累计计时和列表结果；暂停/关闭/重启都保留计时，只有“清空列表”才清零。"""
+    def save_scan_checkpoint(self, force=False):
+        """保存扫描断点。
+
+        扫描过程中不再每完成一个 IP 就同步写整个 JSON 文件。
+        普通调用最多每 2 秒提交一次后台写盘，避免 Tk 主线程被磁盘 IO /
+        JSON 序列化卡住；暂停或关闭时传 force=True，立即保存最后状态。
+        """
         if not self.ip_list:
             return
+
+        now = time.monotonic()
+        if not force:
+            last = float(getattr(self, "_checkpoint_last_request", 0.0) or 0.0)
+            if now - last < 2.0:
+                return
+            self._checkpoint_last_request = now
+
         rows = []
         for item_id in self.tree.get_children(""):
             rows.append({
                 "ip": str(item_id),
                 "values": list(self.tree.item(item_id).get("values", ()))
             })
+
         data = {
-            "ip_list": self.ip_list,
+            "ip_list": list(self.ip_list),
             "completed_ips": sorted(self.completed_ips),
             "success": self.success,
-            "scan_ports": self.scan_ports,
+            "scan_ports": list(self.scan_ports),
             "scan_elapsed": self.scan_elapsed,
             "results": rows,
         }
-        try:
-            with open(self.scan_state_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            self.resume_available = True
-        except Exception as e:
-            print("保存扫描断点失败:", e)
+
+        def write_snapshot(snapshot):
+            try:
+                with open(self.scan_state_file, "w", encoding="utf-8") as f:
+                    json.dump(snapshot, f, ensure_ascii=False, indent=2)
+                self.resume_available = True
+            except Exception as e:
+                print("保存扫描断点失败:", e)
+
+        if force:
+            write_snapshot(data)
+        else:
+            threading.Thread(
+                target=write_snapshot,
+                args=(data,),
+                daemon=True
+            ).start()
 
     def finish_scan(self):
         """扫描全部完成：清除断点，下一次开始重新扫描。"""
@@ -2994,11 +3019,16 @@ class NirSoftCFScanner:
         self.tree.item(item_id, values=values, tags=(tag,))
 
     def update_results(self):
-        while True:
+        processed = 0
+        max_per_cycle = 100
+
+        while processed < max_per_cycle:
             try:
                 msg = self.result_queue.get_nowait()
             except queue.Empty:
                 break
+
+            processed += 1
 
             if not msg:
                 continue
@@ -4480,7 +4510,7 @@ class NirSoftCFScanner:
             self.pause_scan()
         else:
             # 关闭软件也保存最后一次累计计时；只有“清空列表”才会删除断点并清零。
-            self.save_scan_checkpoint()
+            self.save_scan_checkpoint(force=True)
         self.root.destroy()
 
 
