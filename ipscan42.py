@@ -1661,9 +1661,11 @@ class NirSoftCFScanner:
                     if current in candidates:
                         others = [a for a in candidates if a != current]
                         if others:
-                            next_highest = max(available[a]["remain"] for a in others)
+                            next_account = max(others, key=lambda a: available[a]["remain"])
+                            next_highest = available[next_account]["remain"]
                             threshold = next_highest * (1.0 + self.cf_balance_rotation_percent / 100.0)
-                            self.cf_current_account = highest if current_remain <= threshold else current
+                            # 当前账户进入平衡带后，真正切到下一高额度账户。
+                            self.cf_current_account = next_account if current_remain <= threshold else current
                         else:
                             self.cf_current_account = current
                     else:
@@ -1709,9 +1711,10 @@ class NirSoftCFScanner:
         else:
             others = [(a, r) for a, r in candidates if a != current]
             if others:
-                next_remain = max(r for _, r in others)
+                next_account, next_remain = max(others, key=lambda x: x[1])
                 if current_remain <= next_remain * (1.0 + self.cf_balance_rotation_percent / 100.0):
-                    current = highest_account
+                    # 当前账户进入平衡带后，切到下一高额度账户。
+                    current = next_account
 
         self.cf_balance_remaining[current] = max(
             0, int(self.cf_balance_remaining.get(current, 0) or 0) - 1
