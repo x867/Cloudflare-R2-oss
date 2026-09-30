@@ -1684,7 +1684,7 @@ class NirSoftCFScanner:
             self.cf_schedule_pos = 0
 
     def _cf_balance_select_account(self):
-        """平衡模式实际取节点时，用本地虚拟额度抵消 CF 统计延迟。"""
+        """平衡模式实际取节点时，用本地虚拟额度抵消 CF 统计延迟，并按轮换比例切换账户。"""
         fixed_order = [6, 5, 4, 3, 2, 1]
         candidates = []
 
@@ -1705,25 +1705,33 @@ class NirSoftCFScanner:
         if not candidates:
             return int(getattr(self, "cf_current_account", 6) or 6)
 
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        highest_account = candidates[0][0]
-        current = int(getattr(self, "cf_current_account", highest_account) or highest_account)
-        current_remain = next((r for a, r in candidates if a == current), None)
+        # 按剩余量从高到低排列；同额度时保持 6→5→4→3→2→1 的稳定顺序。
+        candidates.sort(key=lambda x: (-x[1], fixed_order.index(x[0])))
 
-        if current_remain is None:
-            current = highest_account
+        current = int(getattr(self, "cf_current_account", candidates[0][0]) or candidates[0][0])
+        candidate_accounts = [a for a, _ in candidates]
+
+        if current not in candidate_accounts:
+            current = candidates[0][0]
         else:
-            others = [(a, r) for a, r in candidates if a != current]
-            if others:
-                # 只向“额度低于当前账户”的下一档轮换，避免两个账户在同一平衡带内来回跳。
-                lower = [(a, r) for a, r in others if r < current_remain]
-                if lower:
-                    next_account, next_remain = max(lower, key=lambda x: x[1])
+            current_pos = candidate_accounts.index(current)
+
+            # 当前账户不是最高额度账户时，只有它已经进入与更高账户的轮换带，
+            # 才回到更高账户；否则继续使用当前账户，避免频繁跳动。
+            if current_pos > 0:
+                higher_account, higher_remain = candidates[current_pos - 1]
+                current_remain = dict(candidates)[current]
+                if current_remain >= higher_remain * (1.0 - self.cf_balance_rotation_percent / 100.0):
+                    current = higher_account
+            else:
+                # 当前就是最高额度账户：当第二档进入轮换带时，切到第二档。
+                if len(candidates) > 1:
+                    next_account, next_remain = candidates[1]
+                    current_remain = candidates[0][1]
                     if current_remain <= next_remain * (1.0 + self.cf_balance_rotation_percent / 100.0):
                         current = next_account
-                else:
-                    current = highest_account
 
+        # 本次实际选择的账户消耗一个本地虚拟请求，用来抵消 CF 后台统计延迟。
         self.cf_balance_remaining[current] = max(
             0, int(self.cf_balance_remaining.get(current, 0) or 0) - 1
         )
