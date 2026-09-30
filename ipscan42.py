@@ -505,6 +505,29 @@ class NirSoftCFScanner:
                 break
         for item in self.tree.get_children():
             self.tree.delete(item)
+
+        # 清空列表后强制恢复主 IP 框右侧滚动条。
+        # 配置页/CF页覆盖主列表时可能改变了控件层级，清空后统一重新定位并提升。
+        try:
+            self.tree.place(
+                x=0,
+                y=0,
+                relwidth=1.0,
+                relheight=1.0
+            )
+            self.tree_scrollbar.place(
+                relx=1.0,
+                rely=0.0,
+                x=-1,
+                relheight=1.0,
+                anchor="ne"
+            )
+            self.tree.lift()
+            self.tree_scrollbar.lift()
+            self.root.after_idle(self.tree_scrollbar.lift)
+        except Exception as e:
+            print("恢复主IP框滚动条失败:", e)
+
         try:
             if os.path.isfile(self.scan_state_file):
                 os.remove(self.scan_state_file)
