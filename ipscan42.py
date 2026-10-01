@@ -115,6 +115,8 @@ class NirSoftCFScanner:
         self.cf_schedule_order = [6, 5, 4, 3, 2, 1]
         self.cf_schedule_pos = 0
         self.cf_current_account = 6
+        self.cf_actual_sni = ""
+        self.cf_actual_account = 6
         self.cf_schedule_lock = threading.Lock()
         # CF 后台请求计数有延迟，因此维护一份本地“虚拟剩余额度”。
         self.cf_balance_remaining = {}
@@ -1863,8 +1865,15 @@ class NirSoftCFScanner:
                 if snis:
                     pos = self._account_sni_pos[index] % len(snis)
                     self._account_sni_pos[index] += 1
-                    return {"uuid": uuid, "sni": snis[pos]}
-                return {"uuid": uuid, "sni": ""}
+                    selected_sni = snis[pos]
+                    self.cf_actual_account = account
+                    self.cf_actual_sni = selected_sni
+                    print(f"CF实际节点: 账户{account} | SNI={selected_sni}")
+                    return {"account": account, "uuid": uuid, "sni": selected_sni}
+                self.cf_actual_account = account
+                self.cf_actual_sni = ""
+                print(f"CF实际节点: 账户{account} | SNI=(空)")
+                return {"account": account, "uuid": uuid, "sni": ""}
 
         return self.get_active_node_config()
 
@@ -1884,6 +1893,11 @@ class NirSoftCFScanner:
         snis = node.get("snis", [])
         if not isinstance(snis, list): snis = [str(node.get("sni", "")).strip()] if node.get("sni") else []
         sni = str(node.get("sni", "")).strip() or (snis[0] if snis else "")
+        account = int(node.get("account", getattr(self, "cf_actual_account", 0)) or 0)
+        if account:
+            self.cf_actual_account = account
+        self.cf_actual_sni = sni
+        print(f"CF写入Xray: 账户{account} | SNI={sni}")
 
         outbounds = config.get("outbounds", [])
         if not outbounds:
