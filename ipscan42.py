@@ -497,8 +497,7 @@ class NirSoftCFScanner:
             else self.scan_elapsed
         )
         self.start_button.config(text="开始")
-        self.set_inputs_state(True)
-        self.xray_stop_event.set()
+        self.set_inputs_state(True)        self.xray_stop_event.set()
         self.force_stop_all_xray()
         self.force_stop_xray()
         self.save_scan_checkpoint(force=True)
@@ -997,7 +996,6 @@ class NirSoftCFScanner:
                             self.column_widths[col] = width
                     except Exception:
                         pass
-
                 sections = []
                 for section in parser.sections():
                     low = section.lower()
@@ -1497,8 +1495,7 @@ class NirSoftCFScanner:
             index = int(self.config_sni_uuid_entry.index("insert").split(".")[0]) - 1
             self._config_read_current()
             self.config_index = max(0, min(index, len(self.node_configs) - 1))
-            self._config_highlight_line()
-        except Exception:
+            self._config_highlight_line()        except Exception:
             pass
 
     def _config_highlight_line(self):
@@ -1838,3 +1835,763 @@ class NirSoftCFScanner:
             0, int(self.cf_balance_remaining.get(current, 0) or 0) - 1
         )
         return current
+    def _sync_cf_schedule_to_worker(self, backend_url, password, mode, reserve1, reserve26, rotation_percent):
+        """把软件里的调度设置同步到账户1 Worker；失败只记录日志，不影响扫描。"""
+        try:
+            backend_url = self._normalize_cf_quota_backend_url(backend_url)
+            if not backend_url or not password:
+                return False
+            payload = json.dumps({
+                "scheduleMode": "drain" if str(mode).lower() == "drain" else "balance",
+                "reserve1Percent": max(0, min(100, int(reserve1))),
+                "reserveOtherPercent": max(0, min(100, int(reserve26))),
+                "rotationPercent": max(1, min(100, int(rotation_percent))),
+            }, ensure_ascii=False).encode("utf-8")
+            request = urllib.request.Request(
+                backend_url + "/admin/setschedule",
+                data=payload,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "CF-IP-Scanner/1.0",
+                    "X-Admin-Password": password,
+                },
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                body = response.read().decode("utf-8-sig", errors="replace")
+            data = json.loads(body or "{}")
+            if not data.get("success"):
+                raise RuntimeError(str(data.get("error") or data.get("msg") or "调度设置同步失败"))
+            return True
+        except Exception as e:
+            print("CF调度设置同步失败:", e)
+            return False
+
+    def _next_cf_node_config(self):
+        """按当前调度模式选择账户，并轮换该账户的 SNI。"""
+        if not self.node_configs:
+            return {"uuid": "", "sni": ""}
+
+        with self.cf_schedule_lock:
+            if self.cf_schedule_mode == "balance" and self.cf_balance_remaining:
+                account = self._cf_balance_select_account()
+            else:
+                order = list(self.cf_schedule_order) or [6, 5, 4, 3, 2, 1]
+                account = int(getattr(self, "cf_current_account", order[0]) or order[0])
+                if account not in order:
+                    account = order[0]
+
+            index = account - 1
+            if 0 <= index < len(self.node_configs):
+                node = self.node_configs[index]
+                uuid = str(node.get("uuid", "")).strip()
+                snis = node.get("snis", [])
+                if not isinstance(snis, list):
+                    snis = [str(node.get("sni", "")).strip()] if node.get("sni") else []
+                snis = [str(x).strip() for x in snis if str(x).strip()]
+                if snis:
+                    pos = self._account_sni_pos[index] % len(snis)
+                    self._account_sni_pos[index] += 1
+                    return {"uuid": uuid, "sni": snis[pos]}
+                return {"uuid": uuid, "sni": ""}
+
+        return self.get_active_node_config()
+
+    def get_active_node_config(self):
+        """返回当前账户的 UUID 和第一个 SNI。"""
+        if not self.node_configs: return {"uuid": "", "sni": ""}
+        node = self.node_configs[min(self.config_index, len(self.node_configs)-1)]
+        snis = node.get("snis", [])
+        if not isinstance(snis, list): snis = [str(node.get("sni", "")).strip()] if node.get("sni") else []
+        return {"account": self.config_index+1, "uuid": str(node.get("uuid", "")).strip(),
+                "snis": snis, "sni": snis[0] if snis else ""}
+
+    def apply_node_config(self, config, node_override=None):
+        """把 UUID/SNI 应用到 Xray 配置；空值会清除模板中的内置值。"""
+        node = node_override if node_override is not None else self.get_active_node_config()
+        uuid = str(node.get("uuid", "")).strip()
+        snis = node.get("snis", [])
+        if not isinstance(snis, list): snis = [str(node.get("sni", "")).strip()] if node.get("sni") else []
+        sni = str(node.get("sni", "")).strip() or (snis[0] if snis else "")
+
+        outbounds = config.get("outbounds", [])
+        if not outbounds:
+            return
+        outbound = outbounds[0]
+
+        vnext = outbound.get("settings", {}).get("vnext", [])
+        if vnext:
+            users = vnext[0].get("users", [])
+            if users:
+                # 无论有没有输入，都覆盖模板里的 UUID，避免偷偷使用 test.json 内置值。
+                users[0]["id"] = uuid
+
+        stream = outbound.setdefault("streamSettings", {})
+        tls = stream.setdefault("tlsSettings", {})
+        # 无论有没有输入，都覆盖模板里的 SNI。
+        tls["serverName"] = sni
+
+        if stream.get("network") == "ws":
+            ws = stream.setdefault("wsSettings", {})
+            headers = ws.setdefault("headers", {})
+            # 同样清掉模板可能残留的 Host，避免继续使用内置 SNI。
+            headers["Host"] = sni
+
+    def set_inputs_state(self, enabled):
+        state = "normal" if enabled else "disabled"
+
+        self.subnet_entry.config(state=state)
+        self.port_entry.config(state=state)
+        self.worker_entry.config(state=state)
+
+    def write_dynamic_xray_config(self, target_ip, target_port):
+        base = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(base, "test.json")
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+
+            if "outbounds" in config:
+                for outbound in config["outbounds"]:
+                    if (
+                        "streamSettings" in outbound
+                        and "tlsSettings" in outbound["streamSettings"]
+                    ):
+                        if "allowInsecure" in outbound["streamSettings"]["tlsSettings"]:
+                            del outbound["streamSettings"]["tlsSettings"]["allowInsecure"]
+
+            outbounds = config.get("outbounds", [])
+
+            if not outbounds:
+                return False
+
+            vnext = (
+                outbounds[0]
+                .get("settings", {})
+                .get("vnext", [])
+            )
+
+            if not vnext:
+                return False
+
+            vnext[0]["address"] = target_ip
+            vnext[0]["port"] = int(target_port)
+
+            stream_settings = outbounds[0].setdefault(
+                "streamSettings",
+                {}
+            )
+
+            if stream_settings.get("network") == "ws":
+                ws_settings = stream_settings.setdefault(
+                    "wsSettings",
+                    {}
+                )
+
+                if not ws_settings.get("path"):
+                    ws_settings["path"] = "/"
+
+                tls_settings = stream_settings.get("tlsSettings", {})
+                server_name = str(
+                    tls_settings.get("serverName", "")
+                ).strip() if isinstance(tls_settings, dict) else ""
+                if server_name:
+                    headers = ws_settings.setdefault("headers", {})
+                    if not str(headers.get("Host", "")).strip():
+                        headers["Host"] = server_name
+
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    config,
+                    f,
+                    indent=4,
+                    ensure_ascii=False
+                )
+
+            return True
+
+        except Exception as e:
+            print("修改 Xray 配置失败:", e)
+            return False
+
+    def start_xray(self):
+        base = os.path.dirname(os.path.abspath(__file__))
+        xray_path = os.path.join(base, "xray.exe")
+
+        self.force_stop_xray()
+        time.sleep(0.08)
+
+        self.xray_stop_event.clear()
+
+        try:
+            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0)
+            if os.name == "nt":
+                creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            startupinfo = None
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+
+            p = subprocess.Popen(
+                [
+                    xray_path,
+                    "run",
+                    "-c",
+                    "test.json"
+                ],
+                cwd=base,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                startupinfo=startupinfo
+            )
+
+            self.xray_process = p
+
+        except Exception as e:
+            print("启动 Xray 失败:", e)
+            self.xray_process = None
+            try:
+                self.root.after(
+                    0,
+                    lambda msg=str(e): self._show_xray_error(msg)
+                )
+            except Exception:
+                pass
+            return False
+
+        deadline = time.perf_counter() + 2.5
+
+        while time.perf_counter() < deadline:
+
+            if self.xray_stop_event.is_set() or self.closing:
+                self.force_stop_xray()
+                return False
+
+            p = self.xray_process
+
+            if p is None or p.poll() is not None:
+                self.xray_process = None
+                return False
+
+            try:
+                s = socket.socket(
+                    socket.AF_INET,
+                    socket.SOCK_STREAM
+                )
+
+                s.settimeout(0.1)
+
+                result = s.connect_ex(
+                    ("127.0.0.1", self.xray_port)
+                )
+
+                s.close()
+
+                if result == 0:
+                    return True
+
+            except Exception:
+                pass
+
+            time.sleep(0.04)
+
+        self.force_stop_xray()
+        return False
+
+    def worker(self):
+        # 每个 IP 作为一个任务：依次测试多个端口。
+        # TCP 成功的端口进入共享 Xray 队列；一个 IP 最终只产生一条列表记录。
+        while not self.scan_stop_event.is_set():
+            ip = None
+            try:
+                with self.index_lock:
+                    if self.next_index >= self.total:
+                        break
+                    index = self.next_index
+                    self.next_index += 1
+                    if self.ip_list[index] in self.completed_ips:
+                        continue
+
+                ip = self.ip_list[index]
+                tcp_successes = []
+
+                for target_port in self.scan_ports:
+                    if self.scan_stop_event.is_set():
+                        break
+                    tcp_delay, tcp_ok = self.test_tcp(ip, target_port)
+                    if tcp_ok:
+                        tcp_successes.append((target_port, tcp_delay))
+
+                if self.scan_stop_event.is_set():
+                    break
+
+                with self.index_lock:
+                    self.ip_scan_states[ip] = {
+                        "pending": len(tcp_successes),
+                        "ports": [],
+                        "tcp_successes": list(tcp_successes),
+                        "best_delay": None,
+                        "best_tcp": None,
+                    }
+
+                if not tcp_successes:
+                    self.result_queue.put(("ip_done", ip, [], None, None))
+                    continue
+
+                for target_port, tcp_delay in tcp_successes:
+                    task = (ip, target_port, tcp_delay)
+                    while not self.scan_stop_event.is_set():
+                        try:
+                            self.xray_task_queue.put(task, timeout=0.1)
+                            break
+                        except queue.Full:
+                            continue
+
+            except Exception as e:
+                print("TCP 扫描线程异常:", e)
+                if ip is not None and not self.scan_stop_event.is_set():
+                    self.result_queue.put(("ip_done", ip, [], None, None))
+
+    def xray_worker(self):
+        # 10 路独立 Xray。每个 TCP 成功端口分别做真延迟，结果回收到同一个 IP。
+        while not self.scan_stop_event.is_set():
+            try:
+                ip, target_port, tcp_delay = self.xray_task_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            try:
+                if self.scan_stop_event.is_set():
+                    continue
+
+                xray_delay, xray_ok = self.run_isolated_xray_test(ip, target_port)
+                self.result_queue.put((
+                    "port_done", ip, target_port, tcp_delay, xray_delay, xray_ok
+                ))
+
+            except Exception as e:
+                print("Xray Worker 异常:", e)
+                try:
+                    self.result_queue.put((
+                        "port_done", ip, target_port, tcp_delay, None, False
+                    ))
+                except Exception:
+                    pass
+
+            finally:
+                try:
+                    self.xray_task_queue.task_done()
+                except Exception:
+                    pass
+
+    def run_isolated_xray_test(self, target_ip, target_port, manual_retest=False):
+        """启动独立 Xray 测试。
+
+        v2rayN 日志里的“Unables to find local process name”属于 v2rayN
+        TUN/进程识别层，本扫描器不负责修改正在运行的 v2rayN。
+        """
+        base = os.path.dirname(os.path.abspath(__file__))
+        xray_path = os.path.join(base, "xray.exe")
+        template_path = os.path.join(base, "test.json")
+
+        try:
+            with open(template_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+
+            scheduled_node = self._next_cf_node_config()
+            self.apply_node_config(config, scheduled_node)
+
+            # 为每个 Xray 实例分配独立 SOCKS 端口，避免 10 路互相抢端口。
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", 0))
+                socks_port = s.getsockname()[1]
+
+            inbounds = config.get("inbounds", [])
+            if not inbounds:
+                return None, False
+            inbounds[0]["listen"] = "127.0.0.1"
+            inbounds[0]["port"] = socks_port
+
+            outbounds = config.get("outbounds", [])
+            if not outbounds:
+                return None, False
+
+            vnext = outbounds[0].get("settings", {}).get("vnext", [])
+            if not vnext:
+                return None, False
+
+            vnext[0]["address"] = target_ip
+            vnext[0]["port"] = int(target_port)
+
+            stream = outbounds[0].setdefault("streamSettings", {})
+
+            # IPv6 候选 IP 单独记录；IPv4 保持原有扫描路径。
+            try:
+                target_is_ipv6 = ipaddress.ip_address(str(target_ip).strip()).version == 6
+            except Exception:
+                target_is_ipv6 = False
+
+            # 只有 IPv6 候选使用 IPv6 专用路由设置，IPv4 不添加任何 IPv6 参数。
+            if target_is_ipv6:
+                sockopt = stream.setdefault("sockopt", {})
+                sockopt["domainStrategy"] = "ForceIPv6"
+
+            tls = stream.get("tlsSettings")
+            if isinstance(tls, dict):
+                tls.pop("allowInsecure", None)
+            if stream.get("network") == "ws":
+                ws_settings = stream.setdefault("wsSettings", {})
+                ws_settings.setdefault("path", "/")
+
+                # Cloudflare Worker / WS 节点的关键：
+                # 扫描时连接的是候选 IP，但 HTTP Host 仍必须是原节点域名。
+                # 仅修改 vnext.address 而不设置 Host，会导致 Cloudflare 路由不到
+                # 正确的 Worker，表现为 TCP 正常、Xray 实测全部失败。
+                tls_server_name = ""
+                if isinstance(tls, dict):
+                    tls_server_name = str(tls.get("serverName", "")).strip()
+                if tls_server_name:
+                    headers = ws_settings.setdefault("headers", {})
+                    if not str(headers.get("Host", "")).strip():
+                        headers["Host"] = tls_server_name
+
+            config_path = os.path.join(
+                base, f"_xray_test_{socks_port}_{threading.get_ident()}.json"
+            )
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+
+            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0)
+            if os.name == "nt":
+                creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            startupinfo = None
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+
+            log_path = os.path.join(
+                base, f"_xray_test_{socks_port}_{threading.get_ident()}.log"
+            )
+            log_file = open(log_path, "w", encoding="utf-8", errors="ignore")
+            p = subprocess.Popen(
+                [xray_path, "run", "-c", config_path],
+                cwd=base, stdout=log_file, stderr=log_file,
+                creationflags=creationflags,
+                startupinfo=startupinfo
+            )
+
+            with self.xray_process_lock:
+                self.xray_processes.add(p)
+
+            # IPv6 Xray 首次建连可能明显慢于 IPv4；只放宽 IPv6。
+            deadline = time.perf_counter() + (6.0 if target_is_ipv6 else 2.5)
+            ready = False
+            while time.perf_counter() < deadline:
+                if ((self.scan_stop_event.is_set() and not manual_retest) or p.poll() is not None):
+                    break
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.08)
+                        if s.connect_ex(("127.0.0.1", socks_port)) == 0:
+                            ready = True
+                            break
+                except Exception:
+                    pass
+                time.sleep(0.03)
+
+            if not ready:
+                return None, False
+
+            # IPv4 / IPv6 都统一清理失败日志；IPv6 只使用专用实测超时。
+            if target_is_ipv6:
+                return self.test_vless_real_ping(socks_port, ipv6=True)
+            return self.test_vless_real_ping(socks_port)
+
+        except Exception as e:
+            print("独立 Xray 测试失败:", e)
+            try:
+                self.root.after(
+                    0,
+                    lambda msg=str(e): self._show_xray_error(msg)
+                )
+            except Exception:
+                pass
+            return None, False
+
+        finally:
+            try:
+                if 'p' in locals() and p is not None:
+                    try:
+                        if p.poll() is None:
+                            p.terminate()
+                            try:
+                                p.wait(timeout=0.3)
+                            except subprocess.TimeoutExpired:
+                                p.kill()
+                    except Exception:
+                        pass
+                    try:
+                        with self.xray_process_lock:
+                            self.xray_processes.discard(p)
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    if 'log_file' in locals() and log_file is not None:
+                        log_file.close()
+                except Exception:
+                    pass
+                try:
+                    if 'config_path' in locals() and os.path.isfile(config_path):
+                        os.remove(config_path)
+                except Exception:
+                    pass
+                try:
+                    if log_path and os.path.isfile(log_path):
+                        os.remove(log_path)
+                except Exception:
+                    pass
+
+    def stop_process(self, p):
+        """停止单个独立 Xray 进程，并从进程集合中移除。"""
+        try:
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=0.35)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    try:
+                        p.wait(timeout=0.35)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        with self.xray_process_lock:
+            self.xray_processes.discard(p)
+
+    def force_stop_all_xray(self):
+        with self.xray_process_lock:
+            processes = list(self.xray_processes)
+            self.xray_processes.clear()
+
+        for p in processes:
+            try:
+                if p.poll() is None:
+                    p.terminate()
+                    try:
+                        p.wait(timeout=0.25)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+            except Exception:
+                pass
+
+    def _expand_scan_network(self, value, max_ipv6_hosts=4096):
+        """展开扫描目标，支持 IPv4 / IPv6 双栈。
+
+        IPv4 保持原来的完整展开方式。
+        IPv6 对很大的网段采用随机抽样，避免 /64 之类前缀被展开成天文数字。
+        单个 IPv6 地址始终只扫描该地址。
+        """
+        value = str(value).strip()
+        if not value:
+            return []
+
+        target = ipaddress.ip_network(value, strict=False)
+        if target.version == 4:
+            hosts = [str(ip) for ip in target.hosts()]
+            if not hosts and target.num_addresses == 1:
+                hosts = [str(target.network_address)]
+            return hosts
+
+        # IPv6：小网段完整扫描，大网段随机抽样。
+        if target.num_addresses <= max_ipv6_hosts:
+            hosts = [str(ip) for ip in target.hosts()]
+            if not hosts and target.num_addresses == 1:
+                hosts = [str(target.network_address)]
+            return hosts
+
+        # /64 等超大 IPv6 网段不能完整展开。
+        # 抽样范围避开全 0 网络地址，最多生成 max_ipv6_hosts 个唯一地址。
+        first = int(target.network_address)
+        last = int(target.broadcast_address)
+        if last <= first:
+            return [str(target.network_address)]
+
+        sample_count = min(max_ipv6_hosts, max(1, last - first))
+        # Python 的 random.sample(range(...)) 对 2^64 / 2^128 级别的 range
+        # 可能触发 OverflowError，因此这里按主机位随机生成偏移。
+        host_bits = target.max_prefixlen - target.prefixlen
+        values = set()
+        while len(values) < sample_count:
+            offset = random.getrandbits(host_bits)
+            # 跳过网络地址，保留最多 max_ipv6_hosts 个唯一主机地址。
+            if offset:
+                values.add(offset)
+        return [
+            str(ipaddress.IPv6Address(first + offset))
+            for offset in values
+        ]
+
+    def _get_physical_ipv4_interfaces(self):
+        """
+        Windows 下获取可用于直连公网的本机 IPv4/接口索引。
+
+        不使用 PowerShell，不在程序启动时执行。
+        只在第一次 TCP 扫描时缓存一次结果。
+        优先选择带网关、处于 UP 状态、且名称不像 TUN/VPN/虚拟网卡的接口。
+        """
+        if hasattr(self, "_physical_interfaces_cache"):
+            return self._physical_interfaces_cache
+
+        result = []
+
+        if os.name != "nt":
+            self._physical_interfaces_cache = result
+            return result
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class IP_ADDR_STRING(ctypes.Structure):
+                pass
+
+            IP_ADDR_STRING._fields_ = [
+                ("Next", ctypes.POINTER(IP_ADDR_STRING)),
+                ("IpAddress", ctypes.c_char * 16),
+                ("IpMask", ctypes.c_char * 16),
+                ("Context", wintypes.DWORD),
+            ]
+
+            class IP_ADAPTER_INFO(ctypes.Structure):
+                pass
+
+            IP_ADAPTER_INFO._fields_ = [
+                ("Next", ctypes.POINTER(IP_ADAPTER_INFO)),
+                ("ComboIndex", wintypes.DWORD),
+                ("AdapterName", ctypes.c_char * 260),
+                ("Description", ctypes.c_char * 132),
+                ("AddressLength", wintypes.UINT),
+                ("Address", ctypes.c_ubyte * 8),
+                ("Index", wintypes.DWORD),
+                ("Type", wintypes.UINT),
+                ("DhcpEnabled", wintypes.UINT),
+                ("CurrentIpAddress", ctypes.POINTER(IP_ADDR_STRING)),
+                ("IpAddressList", IP_ADDR_STRING),
+                ("GatewayList", IP_ADDR_STRING),
+                ("DhcpServer", IP_ADDR_STRING),
+                ("HaveWins", wintypes.BOOL),
+                ("PrimaryWinsServer", IP_ADDR_STRING),
+                ("SecondaryWinsServer", IP_ADDR_STRING),
+                ("LeaseObtained", wintypes.c_ulong),
+                ("LeaseExpires", wintypes.c_ulong),
+            ]
+
+            GetAdaptersInfo = ctypes.windll.iphlpapi.GetAdaptersInfo
+            GetAdaptersInfo.argtypes = [
+                ctypes.POINTER(IP_ADAPTER_INFO),
+                ctypes.POINTER(wintypes.ULONG),
+            ]
+            GetAdaptersInfo.restype = wintypes.ULONG
+
+            size = wintypes.ULONG(0)
+            ERROR_BUFFER_OVERFLOW = 111
+            rc = GetAdaptersInfo(None, ctypes.byref(size))
+            if rc != ERROR_BUFFER_OVERFLOW or size.value <= 0:
+                self._physical_interfaces_cache = result
+                return result
+
+            buffer = ctypes.create_string_buffer(size.value)
+            adapter_ptr = ctypes.cast(
+                buffer,
+                ctypes.POINTER(IP_ADAPTER_INFO)
+            )
+
+            rc = GetAdaptersInfo(adapter_ptr, ctypes.byref(size))
+            if rc != 0:
+                self._physical_interfaces_cache = result
+                return result
+
+            blocked_words = (
+                "tun", "wintun", "tap", "vpn", "wireguard",
+                "v2ray", "clash", "sing-box", "zerotier",
+                "tailscale", "virtual", "vmware", "virtualbox",
+                "hyper-v", "hyperv", "loopback"
+            )
+
+            adapter = adapter_ptr
+            while bool(adapter):
+                a = adapter.contents
+
+                try:
+                    desc = bytes(a.Description).split(b"\0", 1)[0].decode(
+                        errors="ignore"
+                    ).strip()
+                except Exception:
+                    desc = ""
+
+                desc_lower = desc.lower()
+
+                # Ethernet=6；其他类型也允许，但虚拟/VPN 名称明确排除。
+                if not any(word in desc_lower for word in blocked_words):
+                    ip_node = a.IpAddressList
+                    gateway_node = a.GatewayList
+
+                    while True:
+                        ip_text = bytes(ip_node.IpAddress).split(
+                            b"\0", 1
+                        )[0].decode(errors="ignore").strip()
+
+                        gateway_text = bytes(gateway_node.IpAddress).split(
+                            b"\0", 1
+                        )[0].decode(errors="ignore").strip()
+
+                        if ip_text and ip_text != "0.0.0.0":
+                            try:
+                                addr = ipaddress.ip_address(ip_text)
+                                if addr.version == 4 and not addr.is_loopback:
+                                    result.append({
+                                        "ip": ip_text,
+                                        "gateway": gateway_text,
+                                        "index": int(a.Index),
+                                        "description": desc,
+                                    })
+                            except Exception:
+                                pass
+
+                        if not ip_node.Next:
+                            break
+                        ip_node = ip_node.Next.contents
+
+                        if gateway_node.Next:
+                            gateway_node = gateway_node.Next.contents
+
+                if not a.Next:
+                    break
+                adapter = a.Next
+
+            # 有网关的接口优先；再优先 Ethernet 类型；最后按原顺序。
+            result.sort(
+                key=lambda x: (
+                    0 if x.get("gateway") and x["gateway"] != "0.0.0.0" else 1,
+                    0 if "ethernet" in x.get("description", "").lower() else 1
+                )
+            )
+
+        except Exception as e:
+            print("获取物理 IPv4 接口失败:", e)
+            result = []
+
+        self._physical_interfaces_cache = result
+        return result
+
+    def _select_direct_tcp_interface(self):
+        """选择一个尽量绕过 TUN/VPN 的真实 IPv4 出口。"""
+        interfaces = self._get_physical_ipv4_interfaces()
