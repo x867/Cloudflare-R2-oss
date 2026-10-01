@@ -3186,7 +3186,11 @@ class NirSoftCFScanner:
 
             if msg[0] == "ip_done":
                 _, ip, ports, best_tcp, best_xray = msg
-                self.tested += 1
+                # 同一个 IP 可能同时收到兜底完成消息和 Xray 完成消息。
+                # 一个 IP 只能计入一次进度，避免出现 260/256 这类超额进度。
+                if ip in self.completed_ips:
+                    continue
+                self.tested = min(self.total, self.tested + 1)
                 if ports:
                     self.success += 1
                     self._display_ip_result(ip, ports, best_tcp, best_xray)
@@ -3212,7 +3216,11 @@ class NirSoftCFScanner:
                         state["best_tcp"] = tcp_delay
 
                 if state["pending"] <= 0:
-                    self.tested += 1
+                    # 防止同一个 IP 被重复完成计数。
+                    if ip in self.completed_ips:
+                        self.ip_scan_states.pop(ip, None)
+                        continue
+                    self.tested = min(self.total, self.tested + 1)
                     valid = state["ports"]
                     if valid:
                         self.success += 1
