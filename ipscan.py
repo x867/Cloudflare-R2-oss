@@ -299,6 +299,7 @@ class NirSoftCFScanner:
         # Ctrl/Shift 多选仍保留 Treeview 原生行为。
         self.tree.bind("<ButtonPress-1>", self._ip_box_select_press, add="+")
         self.tree.bind("<B1-Motion>", self._ip_box_select_drag, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._ip_box_select_release, add="+")
 
         # Treeview 占满整个“文本框”区域；
         # 滚动条覆盖在最右侧边缘，视觉上属于文本框内部。
@@ -4717,19 +4718,40 @@ class NirSoftCFScanner:
     # ========================================================
 
     def _ip_box_select_press(self, event):
-        """记录拖动多选的起始行。"""
+        """记录拖动多选的起始行，并准备自动滚动。"""
         item = self.tree.identify_row(event.y)
         self._ip_drag_anchor = item if item else None
         self._ip_drag_active = False
+        self._ip_drag_scroll_job = None
 
     def _ip_box_select_drag(self, event):
-        """鼠标左键按住，在主 IP 列表中上下拖动即可连续多选。"""
+        """鼠标左键按住拖动，多选并在列表边缘自动滚动。"""
         anchor = getattr(self, "_ip_drag_anchor", None)
         if not anchor:
             return
 
-        current = self.tree.identify_row(event.y)
+        # 鼠标拖到列表顶部/底部时自动滚动，继续拖动即可选择更多 IP。
+        height = self.tree.winfo_height()
+        edge = 28
+        if event.y < edge:
+            self.tree.yview_scroll(-3, "units")
+            self._ip_drag_start_autoscroll()
+        elif event.y > height - edge:
+            self.tree.yview_scroll(3, "units")
+            self._ip_drag_start_autoscroll()
+        else:
+            self._ip_drag_stop_autoscroll()
+
+        current = self.tree.identify_row(max(0, min(event.y, height - 1)))
         if not current:
+            return
+
+        self._ip_box_select_to(current)
+
+    def _ip_box_select_to(self, current):
+        """把起点到当前行之间的 IP 一次性选中。"""
+        anchor = getattr(self, "_ip_drag_anchor", None)
+        if not anchor or not current:
             return
 
         children = self.tree.get_children("")
@@ -4740,11 +4762,57 @@ class NirSoftCFScanner:
             return
 
         lo, hi = sorted((start, end))
-
-        # 拖动选择时一次性更新选中范围，避免逐行闪烁。
         self.tree.selection_set(children[lo:hi + 1])
         self.tree.focus(current)
         self._ip_drag_active = True
+
+    def _ip_box_select_release(self, event=None):
+        """结束拖动多选并停止自动滚动。"""
+        self._ip_drag_stop_autoscroll()
+
+    def _ip_drag_start_autoscroll(self):
+        if getattr(self, "_ip_drag_scroll_job", None) is None:
+            self._ip_drag_scroll_job = self.root.after(
+                50, self._ip_drag_autoscroll
+            )
+
+    def _ip_drag_stop_autoscroll(self):
+        job = getattr(self, "_ip_drag_scroll_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._ip_drag_scroll_job = None
+
+    def _ip_drag_autoscroll(self):
+        """鼠标停在边缘不动时，也持续滚动并扩大选区。"""
+        self._ip_drag_scroll_job = None
+
+        if not getattr(self, "_ip_drag_anchor", None):
+            return
+
+        try:
+            x, y = self.tree.winfo_pointerxy()
+            y = y - self.tree.winfo_rooty()
+        except Exception:
+            return
+
+        height = self.tree.winfo_height()
+        edge = 28
+
+        if y < edge:
+            self.tree.yview_scroll(-3, "units")
+        elif y > height - edge:
+            self.tree.yview_scroll(3, "units")
+        else:
+            return
+
+        current = self.tree.identify_row(max(0, min(y, height - 1)))
+        if current:
+            self._ip_box_select_to(current)
+
+        self._ip_drag_start_autoscroll()
 
     def show_context_menu(self, event):
         item = self.tree.identify_row(event.y)
