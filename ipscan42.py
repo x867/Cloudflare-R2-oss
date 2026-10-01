@@ -497,8 +497,8 @@ class NirSoftCFScanner:
             else self.scan_elapsed
         )
         self.start_button.config(text="开始")
-        self.set_inputs_state(True)        self.xray_stop_event.set()
-        self.force_stop_all_xray()
+        self.set_inputs_state(True)
+        self.xray_stop_event.set()        self.force_stop_all_xray()
         self.force_stop_xray()
         self.save_scan_checkpoint(force=True)
         self.update_status()
@@ -997,8 +997,7 @@ class NirSoftCFScanner:
                     except Exception:
                         pass
                 sections = []
-                for section in parser.sections():
-                    low = section.lower()
+                for section in parser.sections():                    low = section.lower()
                     prefix = "account" if low.startswith("account") else ("node" if low.startswith("node") else "")
                     if not prefix: continue
                     try: number = int(section[len(prefix):])
@@ -1497,7 +1496,6 @@ class NirSoftCFScanner:
             self.config_index = max(0, min(index, len(self.node_configs) - 1))
             self._config_highlight_line()        except Exception:
             pass
-
     def _config_highlight_line(self):
         try:
             self.config_sni_uuid_entry.tag_remove("current_node", "1.0", "end")
@@ -1997,8 +1995,7 @@ class NirSoftCFScanner:
                 server_name = str(
                     tls_settings.get("serverName", "")
                 ).strip() if isinstance(tls_settings, dict) else ""
-                if server_name:
-                    headers = ws_settings.setdefault("headers", {})
+                if server_name:                    headers = ws_settings.setdefault("headers", {})
                     if not str(headers.get("Host", "")).strip():
                         headers["Host"] = server_name
 
@@ -2497,8 +2494,7 @@ class NirSoftCFScanner:
             GetAdaptersInfo = ctypes.windll.iphlpapi.GetAdaptersInfo
             GetAdaptersInfo.argtypes = [
                 ctypes.POINTER(IP_ADAPTER_INFO),
-                ctypes.POINTER(wintypes.ULONG),
-            ]
+                ctypes.POINTER(wintypes.ULONG),            ]
             GetAdaptersInfo.restype = wintypes.ULONG
 
             size = wintypes.ULONG(0)
@@ -2997,7 +2993,6 @@ class NirSoftCFScanner:
 
             # 至少 1 MiB 才认为这次测速有效。
             min_valid_bytes = 1 * 1024 * 1024
-
             if total_bytes < min_valid_bytes:
                 raise RuntimeError(
                     f"测速数据不足：{total_bytes / 1024:.0f} KB"
@@ -3497,7 +3492,6 @@ class NirSoftCFScanner:
     # ========================================================
     # Cloudflare 六账户 Workers 请求额度
     # ========================================================
-
     def load_cf_quota_config(self):
         """读取额度后台连接配置；客户端不保存六个 Cloudflare Account ID / Token。"""
         base = os.path.dirname(os.path.abspath(__file__))
@@ -3997,8 +3991,7 @@ class NirSoftCFScanner:
                 self.cf_reserve_accounts2_6 = config["reserve_accounts2_6"]
                 self.cf_balance_rotation_percent = config["balance_rotation_percent"]
                 threading.Thread(
-                    target=self._sync_cf_schedule_to_worker,
-                    args=(
+                    target=self._sync_cf_schedule_to_worker,                    args=(
                         config["backend_url"],
                         config["password"],
                         config["schedule_mode"],
@@ -4497,8 +4490,7 @@ class NirSoftCFScanner:
                 urllib.request.HTTPCookieProcessor(cookie_jar)
             )
 
-            # 登录
-            login_data = urllib.parse.urlencode({
+            # 登录            login_data = urllib.parse.urlencode({
                 "password": password
             }).encode("utf-8")
 
