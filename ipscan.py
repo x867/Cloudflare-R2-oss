@@ -670,6 +670,9 @@ class NirSoftCFScanner:
                 values = row.get("values", [])
                 if ip and values:
                     self.tree.insert("", "end", iid=ip, values=tuple(values), tags=("good",))
+
+            # 启动恢复断点时，也按前三段相同的 IP 自动分组。
+            self._auto_sort_ip_groups()
             self.update_status()
         except Exception as e:
             print("读取扫描断点失败:", e)
@@ -3377,6 +3380,41 @@ class NirSoftCFScanner:
             speed = old[4] if len(old) >= 5 else "测速"
             values = values[:4] + (speed,)
             self.tree.item(ip, values=values, tags=(row_tag,))
+
+        # 新节点进入主 IP 框后，默认按“前1段+前2段+前3段”分组，
+        # 同一前三段的 IP 自动排在一起；第四段在组内继续按数字排序。
+        self._auto_sort_ip_groups()
+
+    def _auto_sort_ip_groups(self):
+        """默认按 IPv4 前三段分组，第四段在组内按数字排序。
+        用户手动切换到其它表头排序后，不打断用户自己的排序方式。
+        """
+        if self.sort_column not in (None, "ip"):
+            return
+
+        items = []
+        for iid in self.tree.get_children(""):
+            values = self.tree.item(iid)["values"]
+            tags = self.tree.item(iid)["tags"]
+            items.append((self._ip_group_sort_key(values), iid, values, tags))
+
+        items.sort(key=lambda x: x[0], reverse=bool(self.sort_reverse))
+        for index, (_, iid, _, _) in enumerate(items):
+            self.tree.move(iid, "", index)
+
+    def _ip_group_sort_key(self, values):
+        """IP 排序键：前三段作为分组键，第四段作为组内排序键。"""
+        try:
+            text = str(values[0]).strip()
+            parts = text.split(".")
+            if len(parts) == 4:
+                nums = tuple(int(p) for p in parts)
+                return (0, nums[0], nums[1], nums[2], nums[3])
+
+            # 非 IPv4 地址放在 IPv4 后面，保持稳定排序。
+            return (1, text)
+        except Exception:
+            return (1, str(values[0]).strip())
 
     def update_status(self):
         if self.running:
