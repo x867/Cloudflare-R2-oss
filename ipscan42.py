@@ -4021,7 +4021,8 @@ class NirSoftCFScanner:
             }
             if not config["backend_url"]:
                 messagebox.showwarning("提示", "请填写额度后台地址。", parent=dialog)
-                return            if self.save_cf_quota_config(config):
+                return
+            if self.save_cf_quota_config(config):
                 self.cf_quota_accounts = config
                 self.cf_reserve_accounts2_6 = config["reserve_accounts2_6"]
                 self.cf_balance_rotation_percent = config["balance_rotation_percent"]
