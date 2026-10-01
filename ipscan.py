@@ -294,6 +294,11 @@ class NirSoftCFScanner:
 
         # 拖动表头分隔线后立即保存，重启软件仍保持当前列宽。
         self.tree.bind("<ButtonRelease-1>", self._save_column_widths_after_drag, add="+")
+        
+        # 主 IP 列表支持鼠标按住左键上下拖动连续多选。
+        # Ctrl/Shift 多选仍保留 Treeview 原生行为。
+        self.tree.bind("<ButtonPress-1>", self._ip_box_select_press, add="+")
+        self.tree.bind("<B1-Motion>", self._ip_box_select_drag, add="+")
 
         # Treeview 占满整个“文本框”区域；
         # 滚动条覆盖在最右侧边缘，视觉上属于文本框内部。
@@ -4711,6 +4716,36 @@ class NirSoftCFScanner:
     # ========================================================
     # 右键菜单
     # ========================================================
+
+    def _ip_box_select_press(self, event):
+        """记录拖动多选的起始行。"""
+        item = self.tree.identify_row(event.y)
+        self._ip_drag_anchor = item if item else None
+        self._ip_drag_active = False
+
+    def _ip_box_select_drag(self, event):
+        """鼠标左键按住，在主 IP 列表中上下拖动即可连续多选。"""
+        anchor = getattr(self, "_ip_drag_anchor", None)
+        if not anchor:
+            return
+
+        current = self.tree.identify_row(event.y)
+        if not current:
+            return
+
+        children = self.tree.get_children("")
+        try:
+            start = children.index(anchor)
+            end = children.index(current)
+        except ValueError:
+            return
+
+        lo, hi = sorted((start, end))
+
+        # 拖动选择时一次性更新选中范围，避免逐行闪烁。
+        self.tree.selection_set(children[lo:hi + 1])
+        self.tree.focus(current)
+        self._ip_drag_active = True
 
     def show_context_menu(self, event):
         item = self.tree.identify_row(event.y)
