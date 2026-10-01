@@ -497,8 +497,7 @@ class NirSoftCFScanner:
             else self.scan_elapsed
         )
         self.start_button.config(text="开始")
-        self.set_inputs_state(True)
-        self.xray_stop_event.set()        self.force_stop_all_xray()
+        self.set_inputs_state(True)        self.xray_stop_event.set()        self.force_stop_all_xray()
         self.force_stop_xray()
         self.save_scan_checkpoint(force=True)
         self.update_status()
@@ -997,8 +996,7 @@ class NirSoftCFScanner:
                     except Exception:
                         pass
                 sections = []
-                for section in parser.sections():                    low = section.lower()
-                    prefix = "account" if low.startswith("account") else ("node" if low.startswith("node") else "")
+                for section in parser.sections():                    low = section.lower()                    prefix = "account" if low.startswith("account") else ("node" if low.startswith("node") else "")
                     if not prefix: continue
                     try: number = int(section[len(prefix):])
                     except Exception: number = 999999
@@ -1497,8 +1495,7 @@ class NirSoftCFScanner:
             self._config_highlight_line()        except Exception:
             pass
     def _config_highlight_line(self):
-        try:
-            self.config_sni_uuid_entry.tag_remove("current_node", "1.0", "end")
+        try:            self.config_sni_uuid_entry.tag_remove("current_node", "1.0", "end")
             line = self.config_index + 1
             self.config_sni_uuid_entry.tag_add("current_node", f"{line}.0", f"{line}.0 lineend")
             self.config_sni_uuid_entry.tag_configure("current_node", background="#e6f2ff")
@@ -1690,9 +1687,10 @@ class NirSoftCFScanner:
             messagebox.showerror("保存失败", f"无法保存配置：\n{e}")
 
     def _set_cf_schedule(self, data):
-        """更新六账户额度状态。平衡模式下不重置当前账户，实际轮换统一由取节点函数决定。"""
+        """更新六账户额度状态；平衡模式严格按6→5→4→3→2批次轮换，账户1仅作保护账户。"""
         accounts = data.get("accounts", []) if isinstance(data, dict) else []
         fixed_order = [6, 5, 4, 3, 2, 1]
+        balance_order = [6, 5, 4, 3, 2]
         available = {}
 
         try:
@@ -1709,7 +1707,6 @@ class NirSoftCFScanner:
                 if new_day or old_virtual is None:
                     virtual_remain = remain
                 else:
-                    # CF 后台统计可能延迟，本地虚拟额度只允许继续下降，不被旧统计拉高。
                     virtual_remain = min(old_virtual, remain)
 
                 self.cf_balance_reported_used[account] = used
@@ -1737,7 +1734,6 @@ class NirSoftCFScanner:
                 current = 6
 
             if self.cf_schedule_mode == "drain":
-                # 放干模式：只有当前账户跌到保留线，才切到下一个账户。
                 info = available.get(current, {})
                 if info.get("remain", 0) <= info.get("reserve", 0):
                     start_pos = fixed_order.index(current)
@@ -1746,37 +1742,40 @@ class NirSoftCFScanner:
                         candidate_info = available.get(candidate, {})
                         if candidate_info.get("remain", 0) > candidate_info.get("reserve", 0):
                             current = candidate
+                            self.cf_balance_rotation_used[current] = 0
                             break
                 self.cf_current_account = current
             else:
-                # 平衡模式：这里绝不因为一次额度刷新就重选账户。
-                # 当前账户只要仍有可用额度，就保持；真正的轮换由
-                # _cf_balance_select_account() 按轮换比例决定。
+                # 平衡模式不再按“剩余最高”挑账户，避免账户2/6被长期跳过。
+                if current not in balance_order:
+                    current = 6
+
                 current_info = available.get(current, {})
-                if current_info.get("remain", 0) > current_info.get("reserve", 0):
-                    self.cf_current_account = current
-                else:
-                    # 当前账户已经到保留线，立即找剩余最高的可用账户接替。
-                    candidates = [
-                        a for a in fixed_order
-                        if available.get(a, {}).get("remain", 0) > available.get(a, {}).get("reserve", 0)
-                    ]
-                    if candidates:
-                        self.cf_current_account = max(
-                            candidates,
-                            key=lambda a: (available[a]["remain"], -fixed_order.index(a))
-                        )
-                    else:
-                        self.cf_current_account = current
+                if current_info.get("remain", 0) <= current_info.get("reserve", 0):
+                    start_pos = balance_order.index(current) if current in balance_order else 0
+                    next_account = None
+                    for offset in range(1, len(balance_order) + 1):
+                        candidate = balance_order[(start_pos + offset) % len(balance_order)]
+                        candidate_info = available.get(candidate, {})
+                        if candidate_info.get("remain", 0) > candidate_info.get("reserve", 0):
+                            next_account = candidate
+                            break
+                    if next_account is not None:
+                        current = next_account
+                        self.cf_balance_rotation_used[current] = 0
+                    elif available.get(1, {}).get("remain", 0) > available.get(1, {}).get("reserve", 0):
+                        current = 1
+
+                self.cf_current_account = current
 
             self.cf_schedule_order = [self.cf_current_account]
             self.cf_schedule_pos = 0
 
     def _cf_balance_select_account(self):
-        """平衡模式实际取节点：当前账户达到轮换带后才切换，并让绿色标识同步当前账户。"""
-        fixed_order = [6, 5, 4, 3, 2, 1]
+        """平衡模式：按6→5→4→3→2分批轮换；账户1只在2~6均达到保护线后接管。"""
+        balance_order = [6, 5, 4, 3, 2]
         current = int(getattr(self, "cf_current_account", 6) or 6)
-        if current not in fixed_order:
+        if current not in balance_order and current != 1:
             current = 6
 
         def get_reserve(account):
@@ -1793,46 +1792,71 @@ class NirSoftCFScanner:
                 remain = min(remain, self.cf_account1_max_remaining)
             return remain
 
-        current_remain = get_remain(current)
-        current_reserve = get_reserve(current)
+        def is_available(account):
+            return get_remain(account) > get_reserve(account)
 
-        # 当前账户已经到保留线：按 6→5→4→3→2→1 找下一个可用账户。
-        if current_remain <= current_reserve:
-            start_pos = fixed_order.index(current)
-            for offset in range(1, len(fixed_order) + 1):
-                candidate = fixed_order[(start_pos + offset) % len(fixed_order)]
-                if get_remain(candidate) > get_reserve(candidate):
+        # 如果账户1正在兜底，而2~6已经恢复可用，优先回到6开始的备用轮换池。
+        if current == 1:
+            for candidate in balance_order:
+                if is_available(candidate):
                     current = candidate
-                    current_remain = get_remain(current)
+                    self.cf_balance_rotation_used[current] = 0
                     break
 
-        # 当前账户正常使用时，找“剩余最高”的其他账户。
-        # 只有当前额度已经进入设定的轮换百分比带，才切过去。
-        best_other = None
-        best_other_remain = -1
-        for account in fixed_order:
-            if account == current:
-                continue
-            remain = get_remain(account)
-            if remain > get_reserve(account) and remain > best_other_remain:
-                best_other = account
-                best_other_remain = remain
+        if current in balance_order:
+            if not is_available(current):
+                start_pos = balance_order.index(current)
+                next_account = None
+                for offset in range(1, len(balance_order) + 1):
+                    candidate = balance_order[(start_pos + offset) % len(balance_order)]
+                    if is_available(candidate):
+                        next_account = candidate
+                        break
+                if next_account is not None:
+                    current = next_account
+                    self.cf_balance_rotation_used[current] = 0
+                elif is_available(1):
+                    current = 1
 
-        if best_other is not None and current_remain > current_reserve:
-            threshold = best_other_remain * (1.0 + self.cf_balance_rotation_percent / 100.0)
-            if current_remain <= threshold:
-                current = best_other
+            if current in balance_order:
+                # 轮换设置就是每个账户本批次允许使用的额度比例。
+                # 例如10万额度×5%=5000次，完成后切到下一个账户。
+                last = getattr(self, "_last_cf_quota_data", {}) or {}
+                accounts = last.get("accounts", []) if isinstance(last, dict) else {}
+                limit = int(accounts[current - 1].get("todayLimit", 0) or 0) if current - 1 < len(accounts) else 0
+                batch_size = max(1, int(limit * self.cf_balance_rotation_percent / 100)) if limit > 0 else 1
 
-        # 记录本次真正使用的账户；绿色 SNI 标识也直接读取这个状态。
+                used_in_batch = int(self.cf_balance_rotation_used.get(current, 0) or 0) + 1
+                if used_in_batch >= batch_size:
+                    self.cf_balance_rotation_used[current] = 0
+                    start_pos = balance_order.index(current)
+                    next_account = None
+                    for offset in range(1, len(balance_order) + 1):
+                        candidate = balance_order[(start_pos + offset) % len(balance_order)]
+                        if is_available(candidate):
+                            next_account = candidate
+                            break
+                    if next_account is not None:
+                        current = next_account
+                    elif is_available(1):
+                        current = 1
+                else:
+                    self.cf_balance_rotation_used[current] = used_in_batch
+
+        # 2~6全部不可用时，账户1作为最后保护账户。
+        if current not in balance_order and not is_available(current):
+            if is_available(1):
+                current = 1
+
         self.cf_current_account = current
         self.cf_schedule_order = [current]
         self.cf_schedule_pos = 0
 
-        # 本地虚拟消耗 1 次，抵消 CF 后台统计延迟。
         self.cf_balance_remaining[current] = max(
             0, int(self.cf_balance_remaining.get(current, 0) or 0) - 1
         )
         return current
+
     def _sync_cf_schedule_to_worker(self, backend_url, password, mode, reserve1, reserve26, rotation_percent):
         """把软件里的调度设置同步到账户1 Worker；失败只记录日志，不影响扫描。"""
         try:
@@ -1998,7 +2022,6 @@ class NirSoftCFScanner:
                 if server_name:                    headers = ws_settings.setdefault("headers", {})
                     if not str(headers.get("Host", "")).strip():
                         headers["Host"] = server_name
-
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(
                     config,
@@ -2497,8 +2520,7 @@ class NirSoftCFScanner:
                 ctypes.POINTER(wintypes.ULONG),            ]
             GetAdaptersInfo.restype = wintypes.ULONG
 
-            size = wintypes.ULONG(0)
-            ERROR_BUFFER_OVERFLOW = 111
+            size = wintypes.ULONG(0)            ERROR_BUFFER_OVERFLOW = 111
             rc = GetAdaptersInfo(None, ctypes.byref(size))
             if rc != ERROR_BUFFER_OVERFLOW or size.value <= 0:
                 self._physical_interfaces_cache = result
@@ -2997,7 +3019,6 @@ class NirSoftCFScanner:
                 raise RuntimeError(
                     f"测速数据不足：{total_bytes / 1024:.0f} KB"
                 )
-
             if elapsed <= 0:
                 raise RuntimeError("测速计时异常")
 
@@ -3497,8 +3518,7 @@ class NirSoftCFScanner:
         base = os.path.dirname(os.path.abspath(__file__))
         path = os.path.join(base, CF_QUOTA_FILE)
         default = {
-            "backend_url": "",
-            "username": "",
+            "backend_url": "",            "username": "",
             "password": "",
             "remember": False,
             "schedule_mode": "balance",
@@ -3997,8 +4017,7 @@ class NirSoftCFScanner:
                         config["schedule_mode"],
                         5,
                         config["reserve_accounts2_6"],
-                        config["balance_rotation_percent"],
-                    ),
+                        config["balance_rotation_percent"],                    ),
                     daemon=True
                 ).start()
                 if not config["remember"]:
@@ -4497,8 +4516,7 @@ class NirSoftCFScanner:
             login_request = urllib.request.Request(
                 CF_LOGIN_URL,
                 data=login_data,
-                method="POST",
-                headers={
+                method="POST",                headers={
                     "Content-Type": "application/x-www-form-urlencoded",
                     "User-Agent": "CF-IP-Scanner/1.0"
                 }
