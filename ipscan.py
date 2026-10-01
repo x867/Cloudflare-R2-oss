@@ -226,6 +226,14 @@ class NirSoftCFScanner:
         )
         self.config_button.pack(side="left", padx=(5, 0))
 
+        self.rules_button = ttk.Button(
+            top,
+            text="规则设置",
+            width=8,
+            command=self.open_rules_settings
+        )
+        self.rules_button.pack(side="left", padx=(5, 0))
+
         # ====================================================
         # 表格区域
         # ====================================================
@@ -405,6 +413,66 @@ class NirSoftCFScanner:
         self.config_sni_uuid_entry.bind("<Control-v>", self._config_paste_next_line)
         self.config_sni_uuid_entry.bind("<Shift-Insert>", self._config_paste_next_line)
 
+        # ====================================================
+        # 规则设置页：直接覆盖整个 IP 结果区域，暂只搭页面框架
+        # 后续增加规则时再接入扫描逻辑；当前不改变任何筛选行为。
+        # ====================================================
+        self.rules_overlay = tk.Frame(
+            tree_area,
+            bd=0,
+            relief="flat",
+            bg="#f4f4f4",
+            highlightthickness=0
+        )
+        self.rules_overlay.place_forget()
+
+        rules_title = tk.Label(
+            self.rules_overlay,
+            text="规则设置",
+            bg="#f4f4f4",
+            font=("Microsoft YaHei UI", 12, "bold")
+        )
+        rules_title.pack(anchor="w", padx=18, pady=(18, 8))
+
+        rules_hint = tk.Label(
+            self.rules_overlay,
+            text="规则功能先保留页面框架，当前不改变扫描和筛选逻辑。",
+            bg="#f4f4f4",
+            fg="#666666",
+            font=("Microsoft YaHei UI", 9)
+        )
+        rules_hint.pack(anchor="w", padx=18, pady=(0, 18))
+
+        rules_box = tk.Frame(
+            self.rules_overlay,
+            bg="#ffffff",
+            bd=1,
+            relief="solid"
+        )
+        rules_box.pack(fill="x", padx=18, pady=(0, 12))
+
+        tk.Label(
+            rules_box,
+            text="后续规则",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 10, "bold")
+        ).pack(anchor="w", padx=12, pady=(12, 6))
+
+        tk.Label(
+            rules_box,
+            text="这里以后可以加入 TCP 延迟、Xray 延迟、下载速度、纯净度等筛选规则。",
+            bg="#ffffff",
+            fg="#666666",
+            font=("Microsoft YaHei UI", 9)
+        ).pack(anchor="w", padx=12, pady=(0, 12))
+
+        ttk.Button(
+            self.rules_overlay,
+            text="返回",
+            width=10,
+            command=self.close_rules_settings
+        ).pack(anchor="w", padx=18, pady=(4, 0))
+
         self.tree.tag_configure("good", foreground="#008000")
         self.tree.tag_configure("normal", foreground="#333333")
         self.tree.tag_configure("testing", foreground="#0000FF")
@@ -457,8 +525,15 @@ class NirSoftCFScanner:
         )
 
         self.context_menu.add_command(
+            label="复制测试下载后的 IP",
+            command=self.copy_tested_speed_ips
+        )
+
+        # 动态端口子菜单：右键当前 IP 后，只显示该 IP 的可用端口。
+        self.copy_port_menu = tk.Menu(self.context_menu, tearoff=0)
+        self.context_menu.add_cascade(
             label="复制选中 IP:端口",
-            command=self.copy_selected_ip_port
+            menu=self.copy_port_menu
         )
 
         self.context_menu.add_separator()
@@ -1584,6 +1659,41 @@ class NirSoftCFScanner:
             self.root.after(500, self._keep_ip_scrollbar_visible)
         except Exception:
             pass
+
+    def open_rules_settings(self):
+        # 规则设置与扫描配置互斥。
+        try:
+            if getattr(self, "config_mode", False):
+                self.close_node_config()
+        except Exception:
+            pass
+
+        self.rules_overlay.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+        self.rules_overlay.lift()
+
+        try:
+            self.tree_scrollbar.lift()
+        except Exception:
+            pass
+
+        self.rules_button.config(
+            text="返回",
+            command=self.close_rules_settings
+        )
+
+    def close_rules_settings(self):
+        self.rules_overlay.place_forget()
+        self.tree.lift()
+
+        try:
+            self.tree_scrollbar.lift()
+        except Exception:
+            pass
+
+        self.rules_button.config(
+            text="规则设置",
+            command=self.open_rules_settings
+        )
 
     def open_node_config(self):
         # 两个配置页互斥：打开扫描配置前，先自动关闭 CF 配置页。
@@ -4606,30 +4716,114 @@ class NirSoftCFScanner:
         item = self.tree.identify_row(event.y)
 
         if item:
-            self.tree.selection_set(item)
+            # 右键点到已选中的行时保留多选；
+            # 点到未选中的行时切换为该行单选。
+            if item not in self.tree.selection():
+                self.tree.selection_set(item)
+
+            # 根据当前右键行动态生成端口选择菜单。
+            self.copy_port_menu.delete(0, "end")
+            values = self.tree.item(item)["values"]
+
+            if len(values) >= 2:
+                ip = str(values[0]).strip()
+                ports = str(values[1]).replace("，", ",")
+                port_list = []
+
+                for raw_port in ports.split(","):
+                    port = raw_port.strip()
+                    if port and port not in port_list:
+                        port_list.append(port)
+
+                for port in port_list:
+                    self.copy_port_menu.add_command(
+                        label=port,
+                        command=lambda p=port, i=ip: self._copy_one_ip_port(i, p)
+                    )
+
+            if self.copy_port_menu.index("end") is None:
+                self.copy_port_menu.add_command(
+                    label="无可用端口",
+                    state="disabled"
+                )
 
             self.context_menu.tk_popup(
                 event.x_root,
                 event.y_root
             )
 
+    def _copy_one_ip_port(self, ip, port):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(f"{ip}:{port}")
+
     def copy_selected_ip(self):
         selected = self.tree.selection()
+
         if selected:
-            ip = self.tree.item(selected[0])["values"][0]
+            ips = []
+            for item_id in selected:
+                values = self.tree.item(item_id)["values"]
+                if values:
+                    ip = str(values[0]).strip()
+                    if ip:
+                        ips.append(ip)
+
+            if ips:
+                self.root.clipboard_clear()
+                self.root.clipboard_append("\n".join(ips))
+
+    def copy_tested_speed_ips(self):
+        tested_ips = []
+
+        for item_id in self.tree.get_children(""):
+            values = self.tree.item(item_id)["values"]
+
+            if len(values) < 5:
+                continue
+
+            ip = str(values[0]).strip()
+            speed = str(values[4]).strip()
+
+            # 只复制已经完成下载测速并显示速度的 IP。
+            # “测速”/空白/错误状态不计入。
+            if ip and re.search(
+                r"\d+(?:\.\d+)?\s*(?:MB/s|KB/s|B/s)",
+                speed,
+                re.IGNORECASE
+            ):
+                tested_ips.append(ip)
+
+        if tested_ips:
             self.root.clipboard_clear()
-            self.root.clipboard_append(ip)
+            self.root.clipboard_append("\n".join(tested_ips))
+            messagebox.showinfo(
+                "提示",
+                f"已成功复制 {len(tested_ips)} 个测试下载后的 IP 到剪贴板！"
+            )
+        else:
+            messagebox.showinfo(
+                "提示",
+                "当前没有已经完成下载测速的 IP。"
+            )
 
     def copy_selected_ip_port(self):
+        # 保留兼容入口：菜单现在通过端口子菜单直接选择。
         selected = self.tree.selection()
-        if selected:
-            values = self.tree.item(selected[0])["values"]
-            if len(values) >= 2:
-                ip = values[0]
-                ports = str(values[1]).replace("，", ",")
-                nodes = [f"{ip}:{p.strip()}" for p in ports.split(",") if p.strip()]
-                self.root.clipboard_clear()
-                self.root.clipboard_append("\n".join(nodes))
+
+        if not selected:
+            return
+
+        values = self.tree.item(selected[0])["values"]
+
+        if len(values) < 2:
+            return
+
+        ip = str(values[0]).strip()
+        ports = str(values[1]).replace("，", ",")
+        port_list = [p.strip() for p in ports.split(",") if p.strip()]
+
+        if len(port_list) == 1:
+            self._copy_one_ip_port(ip, port_list[0])
 
     def copy_all_valid_ips(self):
         valid_items = [
