@@ -799,7 +799,8 @@ class NirSoftCFScanner:
                     raise ValueError
             except Exception:
                 messagebox.showerror("错误", "IP 或网段格式不正确。")
-                return            random.shuffle(gathered_ips)
+                return
+            random.shuffle(gathered_ips)
             self.ip_list = gathered_ips
             self.completed_ips.clear()
             self.tested = 0
@@ -2422,14 +2423,54 @@ class NirSoftCFScanner:
                 pass
 
     def _expand_scan_network(self, value, max_ipv6_hosts=4096):
-        """展开扫描目标，支持 IPv4 / IPv6 双栈。
-        IPv4 保持原来的完整展开方式。
-        IPv6 对很大的网段采用随机抽样，避免 /64 之类前缀被展开成天文数字。
-        单个 IPv6 地址始终只扫描该地址。
+        """展开扫描目标，支持：
+        1. 单个 IPv4 / IPv6 地址
+        2. CIDR 网段，例如 172.64.229.0/24
+        3. IP 范围，例如 38.147.120.0/38.147.140.0
+           正序、倒序都支持；范围格式包含起止 IP。
         """
         value = str(value).strip()
         if not value:
             return []
+
+        # 两侧都是完整 IP 时，把 "/" 解释为起止 IP 分隔符。
+        # 这样可以同时支持：
+        #   38.147.120.0/38.147.140.0
+        #   38.147.140.0/38.147.120.0
+        if "/" in value:
+            left, right = value.split("/", 1)
+            try:
+                start_ip = ipaddress.ip_address(left.strip())
+                end_ip = ipaddress.ip_address(right.strip())
+                if start_ip.version != end_ip.version:
+                    raise ValueError("IP 版本不一致")
+
+                if start_ip.version == 4:
+                    start_num, end_num = int(start_ip), int(end_ip)
+                    if start_num > end_num:
+                        start_num, end_num = end_num, start_num
+                    return [
+                        str(ipaddress.IPv4Address(n))
+                        for n in range(start_num, end_num + 1)
+                    ]
+
+                # IPv6 范围同样支持正序/倒序；超大范围限制数量。
+                start_num, end_num = int(start_ip), int(end_ip)
+                if start_num > end_num:
+                    start_num, end_num = end_num, start_num
+                count = end_num - start_num + 1
+                if count <= max_ipv6_hosts:
+                    return [str(ipaddress.IPv6Address(n))
+                            for n in range(start_num, end_num + 1)]
+
+                # 超大 IPv6 范围随机抽样，避免一次展开过多地址。
+                values = set()
+                while len(values) < max_ipv6_hosts:
+                    values.add(random.randint(start_num, end_num))
+                return [str(ipaddress.IPv6Address(n)) for n in values]
+            except ValueError:
+                # 不是“IP/IP”范围时，继续按标准 CIDR 处理。
+                pass
 
         target = ipaddress.ip_network(value, strict=False)
         if target.version == 4:
@@ -2453,13 +2494,10 @@ class NirSoftCFScanner:
             return [str(target.network_address)]
 
         sample_count = min(max_ipv6_hosts, max(1, last - first))
-        # Python 的 random.sample(range(...)) 对 2^64 / 2^128 级别的 range
-        # 可能触发 OverflowError，因此这里按主机位随机生成偏移。
         host_bits = target.max_prefixlen - target.prefixlen
         values = set()
         while len(values) < sample_count:
             offset = random.getrandbits(host_bits)
-            # 跳过网络地址，保留最多 max_ipv6_hosts 个唯一主机地址。
             if offset:
                 values.add(offset)
         return [
