@@ -1742,16 +1742,30 @@ class NirSoftCFScanner:
                 current = 6
 
             if self.cf_schedule_mode == "drain":
-                info = available.get(current, {})
-                if info.get("remain", 0) <= info.get("reserve", 0):
-                    start_pos = fixed_order.index(current)
-                    for offset in range(1, len(fixed_order) + 1):
-                        candidate = fixed_order[(start_pos + offset) % len(fixed_order)]
-                        candidate_info = available.get(candidate, {})
-                        if candidate_info.get("remain", 0) > candidate_info.get("reserve", 0):
-                            current = candidate
+                # 放干模式：2~6 是备用额度池，账户1只能在2~6全部到保护线后使用。
+                # 特别处理当前已经落到账户1的情况：只要2~6还有任意可用账户，
+                # 立即回到6→5→4→3→2的备用池，避免账户1被长期占用。
+                backup_available = [
+                    account for account in balance_order
+                    if available.get(account, {}).get("remain", 0) > available.get(account, {}).get("reserve", 0)
+                ]
+                if current == 1 and backup_available:
+                    current = backup_available[0]
+                    self.cf_balance_rotation_used[current] = 0
+                else:
+                    info = available.get(current, {})
+                    if info.get("remain", 0) <= info.get("reserve", 0):
+                        start_pos = fixed_order.index(current)
+                        next_account = None
+                        for offset in range(1, len(fixed_order) + 1):
+                            candidate = fixed_order[(start_pos + offset) % len(fixed_order)]
+                            candidate_info = available.get(candidate, {})
+                            if candidate_info.get("remain", 0) > candidate_info.get("reserve", 0):
+                                next_account = candidate
+                                break
+                        if next_account is not None:
+                            current = next_account
                             self.cf_balance_rotation_used[current] = 0
-                            break
                 self.cf_current_account = current
             else:
                 # 平衡模式不再按“剩余最高”挑账户，避免账户2/6被长期跳过。
