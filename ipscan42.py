@@ -1838,5 +1838,3 @@ class NirSoftCFScanner:
             0, int(self.cf_balance_remaining.get(current, 0) or 0) - 1
         )
         return current
-
-)
