@@ -4760,41 +4760,38 @@ class NirSoftCFScanner:
             self.copy_port_menu.delete(0, "end")
             values = self.tree.item(item)["values"]
 
-            # 多选模式：右键时保留所有已选 IP，
-            # 端口菜单改为复选框，可一次勾选多个端口。
+            # 多选 IP 时直接自动按优先级复制，不要求 IP 之间存在共同端口。
             selected_items = self.tree.selection()
-            all_ports = []
-            for selected_id in selected_items:
-                selected_values = self.tree.item(selected_id)["values"]
-                if len(selected_values) < 2:
-                    continue
-
-                ports = str(selected_values[1]).replace("，", ",")
-                for raw_port in ports.split(","):
-                    port = raw_port.strip()
-                    if port and port not in all_ports:
-                        all_ports.append(port)
-
-            self._copy_port_vars = {}
-            for port in all_ports:
-                var = tk.BooleanVar(value=False)
-                self._copy_port_vars[port] = var
-                self.copy_port_menu.add_checkbutton(
-                    label=port,
-                    variable=var
-                )
-
-            if all_ports:
-                self.copy_port_menu.add_separator()
+            if len(selected_items) > 1:
+                self.copy_port_menu.delete(0, "end")
                 self.copy_port_menu.add_command(
-                    label="复制已选端口",
+                    label="自动按端口优先级复制",
                     command=self.copy_selected_ip_ports
                 )
             else:
-                self.copy_port_menu.add_command(
-                    label="无可用端口",
-                    state="disabled"
-                )
+                # 单个 IP 仍保留原来的端口逐项选择。
+                self.copy_port_menu.delete(0, "end")
+                values = self.tree.item(item)["values"]
+                if len(values) >= 2:
+                    ip = str(values[0]).strip()
+                    ports = str(values[1]).replace("，", ",")
+                    port_list = []
+                    for raw_port in ports.split(","):
+                        port = raw_port.strip()
+                        if port and port not in port_list:
+                            port_list.append(port)
+
+                    for port in port_list:
+                        self.copy_port_menu.add_command(
+                            label=port,
+                            command=lambda p=port, i=ip: self._copy_one_ip_port(i, p)
+                        )
+
+                if self.copy_port_menu.index("end") is None:
+                    self.copy_port_menu.add_command(
+                        label="无可用端口",
+                        state="disabled"
+                    )
 
             self.context_menu.tk_popup(
                 event.x_root,
@@ -4806,49 +4803,69 @@ class NirSoftCFScanner:
         self.root.clipboard_append(f"{ip}:{port}")
 
     def copy_selected_ip_ports(self):
-        """复制当前多选 IP 中勾选的多个端口。
-        每个 IP 只复制它实际拥有的端口。
-        """
+        """多选 IP 时，每个 IP 自动选择自己的最高优先级可用端口。"""
         selected = self.tree.selection()
-        port_vars = getattr(self, "_copy_port_vars", {})
 
-        selected_ports = [
-            port for port, var in port_vars.items()
-            if var.get()
-        ]
-
-        if not selected or not selected_ports:
+        if not selected:
             return
 
+        # 固定的端口优先级。以后新增端口不需要修改这里：
+        # 未列入优先级的端口，会保留该 IP 原本的端口顺序并排在已知端口之后。
+        port_priority = [
+            "443",
+            "2053",
+            "2083",
+            "2087",
+            "2096",
+            "8443",
+        ]
+        priority_map = {port: index for index, port in enumerate(port_priority)}
+
         nodes = []
+        skipped = 0
+
         for item_id in selected:
             values = self.tree.item(item_id)["values"]
             if len(values) < 2:
+                skipped += 1
                 continue
 
             ip = str(values[0]).strip()
             if not ip:
+                skipped += 1
                 continue
 
             ports = str(values[1]).replace("，", ",")
-            row_ports = {
-                p.strip()
-                for p in ports.split(",")
-                if p.strip()
-            }
+            row_ports = []
+            for raw_port in ports.split(","):
+                port = raw_port.strip()
+                if port and port not in row_ports:
+                    row_ports.append(port)
 
-            for port in selected_ports:
-                if port in row_ports:
-                    nodes.append(f"{ip}:{port}")
+            if not row_ports:
+                skipped += 1
+                continue
+
+            # 已知端口按固定优先级，新端口保持原顺序放在后面。
+            sorted_ports = sorted(
+                enumerate(row_ports),
+                key=lambda pair: (
+                    0 if pair[1] in priority_map else 1,
+                    priority_map.get(pair[1], pair[0]),
+                    pair[0],
+                )
+            )
+            best_port = sorted_ports[0][1]
+            nodes.append(f"{ip}:{best_port}")
 
         if nodes:
             self.root.clipboard_clear()
             self.root.clipboard_append("\n".join(nodes))
             messagebox.showinfo(
                 "提示",
-                f"已复制 {len(nodes)} 个 IP:端口"
+                f"已自动选择并复制 {len(nodes)} 个 IP:端口"
+                + (f"，{skipped} 个 IP 无可用端口已跳过" if skipped else "")
             )
-
     def copy_selected_ip(self):
         selected = self.tree.selection()
 
