@@ -4760,23 +4760,37 @@ class NirSoftCFScanner:
             self.copy_port_menu.delete(0, "end")
             values = self.tree.item(item)["values"]
 
-            if len(values) >= 2:
-                ip = str(values[0]).strip()
-                ports = str(values[1]).replace("，", ",")
-                port_list = []
+            # 多选模式：右键时保留所有已选 IP，
+            # 端口菜单改为复选框，可一次勾选多个端口。
+            selected_items = self.tree.selection()
+            all_ports = []
+            for selected_id in selected_items:
+                selected_values = self.tree.item(selected_id)["values"]
+                if len(selected_values) < 2:
+                    continue
 
+                ports = str(selected_values[1]).replace("，", ",")
                 for raw_port in ports.split(","):
                     port = raw_port.strip()
-                    if port and port not in port_list:
-                        port_list.append(port)
+                    if port and port not in all_ports:
+                        all_ports.append(port)
 
-                for port in port_list:
-                    self.copy_port_menu.add_command(
-                        label=port,
-                        command=lambda p=port, i=ip: self._copy_one_ip_port(i, p)
-                    )
+            self._copy_port_vars = {}
+            for port in all_ports:
+                var = tk.BooleanVar(value=False)
+                self._copy_port_vars[port] = var
+                self.copy_port_menu.add_checkbutton(
+                    label=port,
+                    variable=var
+                )
 
-            if self.copy_port_menu.index("end") is None:
+            if all_ports:
+                self.copy_port_menu.add_separator()
+                self.copy_port_menu.add_command(
+                    label="复制已选端口",
+                    command=self.copy_selected_ip_ports
+                )
+            else:
                 self.copy_port_menu.add_command(
                     label="无可用端口",
                     state="disabled"
@@ -4790,6 +4804,50 @@ class NirSoftCFScanner:
     def _copy_one_ip_port(self, ip, port):
         self.root.clipboard_clear()
         self.root.clipboard_append(f"{ip}:{port}")
+
+    def copy_selected_ip_ports(self):
+        """复制当前多选 IP 中勾选的多个端口。
+        每个 IP 只复制它实际拥有的端口。
+        """
+        selected = self.tree.selection()
+        port_vars = getattr(self, "_copy_port_vars", {})
+
+        selected_ports = [
+            port for port, var in port_vars.items()
+            if var.get()
+        ]
+
+        if not selected or not selected_ports:
+            return
+
+        nodes = []
+        for item_id in selected:
+            values = self.tree.item(item_id)["values"]
+            if len(values) < 2:
+                continue
+
+            ip = str(values[0]).strip()
+            if not ip:
+                continue
+
+            ports = str(values[1]).replace("，", ",")
+            row_ports = {
+                p.strip()
+                for p in ports.split(",")
+                if p.strip()
+            }
+
+            for port in selected_ports:
+                if port in row_ports:
+                    nodes.append(f"{ip}:{port}")
+
+        if nodes:
+            self.root.clipboard_clear()
+            self.root.clipboard_append("\n".join(nodes))
+            messagebox.showinfo(
+                "提示",
+                f"已复制 {len(nodes)} 个 IP:端口"
+            )
 
     def copy_selected_ip(self):
         selected = self.tree.selection()
