@@ -2594,4 +2594,2072 @@ class NirSoftCFScanner:
 
     def _select_direct_tcp_interface(self):
         """选择一个尽量绕过 TUN/VPN 的真实 IPv4 出口。"""
-        interfaces = self._get_physical_ipv4_interfaces()
+        interfaces = self._get_physical_ipv4_interfaces()        if interfaces:
+            return interfaces[0]
+        return None
+
+    def test_tcp(self, ip, port):
+        """Windows 直连 TCP 延迟测试，支持 IPv4 / IPv6 双栈。
+
+        IPv4 继续使用现有真实 IPv4 出口选择机制，避免 TUN/VPN 抢路由。
+        IPv6 使用 AF_INET6，由 Windows IPv6 路由选择实际出口，不绑定 IPv4 地址。
+        """
+        sock = None
+        start_ns = time.perf_counter_ns()
+
+        try:
+            ip_obj = ipaddress.ip_address(str(ip).strip())
+            is_ipv6 = ip_obj.version == 6
+            family = socket.AF_INET6 if is_ipv6 else socket.AF_INET
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            # IPv6 节点的实际公网 RTT 可能明显高于 IPv4。
+            # IPv4 保持原来的 0.8 秒，不影响现有扫描速度；
+            # IPv6 单独放宽到 3 秒，避免“V2能连、扫描器却判失败”。
+            sock.settimeout(3.0 if is_ipv6 else 0.8)
+
+            if os.name == "nt" and not is_ipv6:
+                # IPv4 保留现有出口选择机制；IPv6 不走这里。
+                iface = self._select_direct_tcp_interface()
+                if iface:
+                    try:
+                        sock.setsockopt(
+                            socket.IPPROTO_IP,
+                            31,
+                            struct.pack("I", socket.htonl(iface["index"]))
+                        )
+                    except Exception as e:
+                        print("设置 TCP IPv4 出口接口失败:", e)
+
+                    try:
+                        sock.bind((iface["ip"], 0))
+                    except Exception as e:
+                        print("绑定真实 IPv4 失败:", e)
+
+            if is_ipv6:
+                result = sock.connect_ex((str(ip_obj), int(port), 0, 0))
+            else:
+                result = sock.connect_ex((str(ip_obj), int(port)))
+
+            elapsed_ms = (
+                time.perf_counter_ns() - start_ns
+            ) / 1_000_000.0
+
+            if result == 0:
+                return round(elapsed_ms, 1), True
+
+            return None, False
+
+        except Exception:
+            return None, False
+
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def test_vless_real_ping(self, socks_port=None, ipv6=False):
+        """Xray real latency test aligned with v2rayN:
+        establish SOCKS proxy once, then perform two HTTP requests on the same
+        proxy connection and use the lower result. The measured interval starts
+        immediately before each HTTP request, matching v2rayN's GetRealPingTime
+        approach more closely.
+        """
+        sock = None
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # IPv4 保持原来的超时；IPv6 允许更长的建连和 HTTP 等待。
+            proxy_timeout = 8.0 if ipv6 else 3.5
+            handshake_timeout = 5.0 if ipv6 else 2.0
+            http_timeout = 8.0 if ipv6 else 3.5
+            sock.settimeout(proxy_timeout)
+
+            if socks_port is None:
+                socks_port = self.xray_port
+
+            sock.connect(("127.0.0.1", socks_port))
+
+            # SOCKS5 no-auth negotiation.
+            sock.sendall(b"\x05\x01\x00")
+            reply = self.recv_exact(sock, 2, handshake_timeout)
+            if reply != b"\x05\x00":
+                return None, False
+
+            host = "www.gstatic.com"
+            request = (
+                b"\x05\x01\x00\x03"
+                + bytes([len(host)])
+                + host.encode("ascii")
+                + struct.pack(">H", 80)
+            )
+            sock.sendall(request)
+
+            reply = self.recv_exact(sock, 4, handshake_timeout)
+            if (
+                reply is None
+                or len(reply) != 4
+                or reply[0] != 5
+                or reply[1] != 0
+            ):
+                return None, False
+
+            atyp = reply[3]
+            if atyp == 1:
+                remain = self.recv_exact(sock, 6, handshake_timeout)
+            elif atyp == 3:
+                length_data = self.recv_exact(sock, 1, handshake_timeout)
+                if not length_data:
+                    return None, False
+                remain = self.recv_exact(sock, length_data[0] + 2, handshake_timeout)
+            elif atyp == 4:
+                remain = self.recv_exact(sock, 18, handshake_timeout)
+            else:
+                return None, False
+
+            if remain is None:
+                return None, False
+
+            # Keep the destination connection alive. v2rayN creates one HTTP
+            # client and performs two requests, then keeps the lower result.
+            http_get = (
+                "GET /generate_204 HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                "User-Agent: v2rayN/7.24.9\r\n"
+                "Connection: keep-alive\r\n\r\n"
+            ).encode("ascii")
+
+            samples = []
+
+            for attempt in range(2):
+                start = time.perf_counter()
+                sock.sendall(http_get)
+
+                # Read the complete HTTP header. For a 204 response there is
+                # normally no body, so header completion is enough and avoids
+                # waiting for an artificial body/connection close.
+                header = bytearray()
+                deadline = time.perf_counter() + http_timeout
+                while b"\r\n\r\n" not in header:
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        return None, False
+                    sock.settimeout(min(remaining, 1.0))
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    header.extend(chunk)
+                    if len(header) > 65536:
+                        return None, False
+
+                elapsed = round((time.perf_counter() - start) * 1000)
+                if header:
+                    samples.append(elapsed)
+
+                if attempt == 0:
+                    time.sleep(0.1)
+
+            if samples:
+                return min(samples), True
+
+            return None, False
+
+        except Exception:
+            return None, False
+
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def recv_exact(self, sock, n, timeout_sec):
+        sock.settimeout(timeout_sec)
+
+        data = bytearray()
+        start = time.time()
+
+        while len(data) < n:
+
+            if time.time() - start > timeout_sec:
+                return None
+
+            try:
+                chunk = sock.recv(n - len(data))
+
+                if not chunk:
+                    return None
+
+                data.extend(chunk)
+
+            except socket.timeout:
+                continue
+
+            except Exception:
+                return None
+
+        return bytes(data)
+
+    # ========================================================
+    # 下载测速
+    # ========================================================
+
+    def socks5_connect(self, socks_port, host, port, timeout=6.0):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(("127.0.0.1", socks_port))
+
+            # SOCKS5 无认证握手
+            sock.sendall(b"\x05\x01\x00")
+            reply = self.recv_exact(sock, 2, 2.0)
+            if reply != b"\x05\x00":
+                raise RuntimeError("SOCKS5 握手失败")
+
+            host_bytes = host.encode("idna")
+            if len(host_bytes) > 255:
+                raise RuntimeError("目标域名过长")
+
+            request = (
+                b"\x05\x01\x00\x03"
+                + bytes([len(host_bytes)])
+                + host_bytes
+                + struct.pack(">H", int(port))
+            )
+            sock.sendall(request)
+
+            reply = self.recv_exact(sock, 4, timeout)
+            if not reply or reply[0] != 5 or reply[1] != 0:
+                raise RuntimeError("SOCKS5 连接目标失败")
+
+            atyp = reply[3]
+            if atyp == 1:
+                remain = self.recv_exact(sock, 6, timeout)
+            elif atyp == 3:
+                n = self.recv_exact(sock, 1, timeout)
+                if not n:
+                    raise RuntimeError("SOCKS5 地址异常")
+                remain = self.recv_exact(sock, n[0] + 2, timeout)
+            elif atyp == 4:
+                remain = self.recv_exact(sock, 18, timeout)
+            else:
+                remain = None
+
+            if remain is None:
+                raise RuntimeError("SOCKS5 地址读取失败")
+
+            return sock
+        except Exception:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            raise
+
+    def download_speed_test(self, ip, port, item_id):
+        """
+        独立 Xray 下载测速。
+
+        修复：
+        1. 不再使用 speed.cloudflare.com 的 /__down 接口，改用稳定的
+           http://hkg.download.datapacket.com/100mb.bin。
+        2. 每次测速都新建独立 Xray + 独立 SOCKS 端口，第二次测速不会复用
+           上一次连接。
+        3. 使用 HTTP Range，只取前 8 MiB，避免每次下载完整 100 MB。
+        4. 只统计 HTTP 正文实际传输时间，不把 Xray 建连时间算进速度。
+        5. 必须至少收到 1 MiB 才接受结果，防止只收到几十/几百 KB 就显示
+           一个虚高速度。
+        """
+        with self.speed_lock:
+            if item_id in self.speed_testing:
+                return
+            self.speed_testing.add(item_id)
+
+        process = None
+        config_path = None
+        sock = None
+
+        try:
+            self.root.after(
+                0,
+                lambda: self.set_speed_cell(item_id, "测速中...")
+                if self.tree.exists(item_id) else None
+            )
+
+            process, socks_port, config_path = self.create_speed_xray(ip, port)
+
+            if not self.wait_speed_xray_ready(process, socks_port, 5.0):
+                raise RuntimeError("Xray 启动失败")
+
+            host = "hkg.download.datapacket.com"
+            target_port = 80
+
+            # 每次只测速 8 MiB；服务器实际仍是 100mb.bin。
+            test_bytes = 8 * 1024 * 1024
+            range_end = test_bytes - 1
+
+            sock = self.socks5_connect(
+                socks_port,
+                host,
+                target_port,
+                8.0
+            )
+            sock.settimeout(5.0)
+
+            request = (
+                "GET /100mb.bin HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"Range: bytes=0-{range_end}\r\n"
+                "User-Agent: CF-IP-Scanner/2.0\r\n"
+                "Accept: */*\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode("ascii")
+
+            sock.sendall(request)
+
+            # ----------------------------------------------------
+            # 读取完整 HTTP 响应头
+            # ----------------------------------------------------
+            header = bytearray()
+            header_deadline = time.perf_counter() + 8.0
+
+            while b"\r\n\r\n" not in header:
+                if self.closing:
+                    raise RuntimeError("程序正在关闭")
+
+                if time.perf_counter() >= header_deadline:
+                    raise RuntimeError("等待测速响应超时")
+
+                chunk = sock.recv(16384)
+                if not chunk:
+                    raise RuntimeError("测速连接提前关闭")
+
+                header.extend(chunk)
+
+                if len(header) > 65536:
+                    raise RuntimeError("HTTP 响应头异常")
+
+            pos = header.find(b"\r\n\r\n") + 4
+            body = header[pos:]
+
+            header_text = header[:pos].decode(
+                "iso-8859-1",
+                errors="replace"
+            )
+
+            status_line = header_text.split("\r\n", 1)[0]
+
+            try:
+                status_code = int(status_line.split()[1])
+            except Exception:
+                status_code = 0
+
+            if status_code not in (200, 206):
+                raise RuntimeError(
+                    f"测速服务器返回 HTTP {status_code}"
+                )
+
+            # ----------------------------------------------------
+            # 正文测速
+            #
+            # 注意：第一批 body 数据已经在读取响应头时收到，
+            # 因此测速计时从这里开始。
+            # ----------------------------------------------------
+            total_bytes = len(body)
+            start_time = time.perf_counter()
+
+            # 只要达到目标大小就结束；如果服务器忽略 Range，
+            # Connection: close 仍可让我们只读取自己需要的部分。
+            while total_bytes < test_bytes:
+                if self.closing:
+                    raise RuntimeError("程序正在关闭")
+
+                if time.perf_counter() - start_time >= 15.0:
+                    break
+
+                try:
+                    chunk = sock.recv(128 * 1024)
+                except socket.timeout:
+                    continue
+
+                if not chunk:
+                    break
+
+                total_bytes += len(chunk)
+
+                # 防止服务器忽略 Range 并一次性返回超过目标的数据。
+                if total_bytes > test_bytes:
+                    total_bytes = test_bytes
+
+            elapsed = time.perf_counter() - start_time
+
+            # 至少 1 MiB 才认为这次测速有效。
+            min_valid_bytes = 1 * 1024 * 1024
+
+            if total_bytes < min_valid_bytes:
+                raise RuntimeError(
+                    f"测速数据不足：{total_bytes / 1024:.0f} KB"
+                )
+
+            if elapsed <= 0:
+                raise RuntimeError("测速计时异常")
+
+            speed = total_bytes / elapsed
+            text = self.format_speed(speed)
+
+            self.root.after(
+                0,
+                lambda t=text: self.set_speed_cell(item_id, t)
+                if self.tree.exists(item_id) else None
+            )
+
+        except Exception as e:
+            print(f"下载测速失败 [{ip}:{port}]: {e}")
+
+            self.root.after(
+                0,
+                lambda: self.set_speed_cell(item_id, "失败")
+                if self.tree.exists(item_id) else None
+            )
+
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+            if process is not None:
+                self.stop_process(process)
+
+            if config_path and os.path.isfile(config_path):
+                try:
+                    os.remove(config_path)
+                except Exception:
+                    pass
+
+            with self.speed_lock:
+                self.speed_testing.discard(item_id)
+
+    def create_speed_xray(self, target_ip, target_port):
+        """创建专用于下载测速的独立 Xray。"""
+        base = os.path.dirname(os.path.abspath(__file__))
+        xray_path = os.path.join(base, "xray.exe")
+        template_path = os.path.join(base, "test.json")
+
+        with open(template_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+
+        # 下载测速也必须使用当前六账户轮换节点，不能回退到账户1。
+        scheduled_node = self._next_cf_node_config()
+        self.apply_node_config(config, scheduled_node)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            socks_port = s.getsockname()[1]
+
+        inbounds = config.get("inbounds", [])
+        outbounds = config.get("outbounds", [])
+        if not inbounds or not outbounds:
+            raise RuntimeError("test.json 缺少 inbounds/outbounds")
+
+        inbounds[0]["listen"] = "127.0.0.1"
+        inbounds[0]["port"] = socks_port
+
+        vnext = outbounds[0].get("settings", {}).get("vnext", [])
+        if not vnext:
+            raise RuntimeError("test.json 缺少 vnext")
+        vnext[0]["address"] = target_ip
+        vnext[0]["port"] = int(target_port)
+
+        stream = outbounds[0].setdefault("streamSettings", {})
+        tls = stream.get("tlsSettings")
+        if isinstance(tls, dict):
+            tls.pop("allowInsecure", None)
+        if stream.get("network") == "ws":
+            ws_settings = stream.setdefault("wsSettings", {})
+            ws_settings.setdefault("path", "/")
+            tls_server_name = ""
+            if isinstance(tls, dict):
+                tls_server_name = str(tls.get("serverName", "")).strip()
+            if tls_server_name:
+                headers = ws_settings.setdefault("headers", {})
+                if not str(headers.get("Host", "")).strip():
+                    headers["Host"] = tls_server_name
+
+        config_path = os.path.join(
+            base, f"_xray_speed_{socks_port}_{threading.get_ident()}.json"
+        )
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+        creationflags = getattr(subprocess, "DETACHED_PROCESS", 0)
+        if os.name == "nt":
+            creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
+        try:
+            process = subprocess.Popen(
+                [xray_path, "run", "-c", config_path],
+                cwd=base,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                startupinfo=startupinfo
+            )
+        except Exception:
+            try:
+                os.remove(config_path)
+            except Exception:
+                pass
+            raise
+
+        with self.xray_process_lock:
+            self.xray_processes.add(process)
+
+        return process, socks_port, config_path
+
+    def wait_speed_xray_ready(self, process, socks_port, timeout=4.0):
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
+            if self.closing or process.poll() is not None:
+                return False
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.1)
+                    if s.connect_ex(("127.0.0.1", socks_port)) == 0:
+                        return True
+            except Exception:
+                pass
+            time.sleep(0.03)
+        return False
+
+    def format_speed(self, bytes_per_sec):
+        if bytes_per_sec >= 1024 * 1024:
+            return f"{bytes_per_sec / (1024 * 1024):.2f} MB/s"
+        return f"{bytes_per_sec / 1024:.0f} KB/s"
+
+    def set_speed_cell(self, item_id, text):
+        if not self.tree.exists(item_id):
+            return
+        values = list(self.tree.item(item_id)["values"])
+        while len(values) < 5:
+            values.append("-")
+        values[4] = text
+        if text == "测速中...":
+            tag = "testing"
+        elif text == "失败":
+            # 测速失败不能反过来把一个 Xray 有效节点标成失败。
+            old_tags = self.tree.item(item_id).get("tags", ())
+            tag = old_tags[0] if old_tags else "good"
+        else:
+            tag = "speed"
+        self.tree.item(item_id, values=values, tags=(tag,))
+
+    def update_results(self):
+        processed = 0
+        max_per_cycle = 100
+
+        while processed < max_per_cycle:
+            try:
+                msg = self.result_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            processed += 1
+
+            if not msg:
+                continue
+
+            if msg[0] == "ip_done":
+                _, ip, ports, best_tcp, best_xray = msg
+                self.tested += 1
+                if ports:
+                    self.success += 1
+                    self._display_ip_result(ip, ports, best_tcp, best_xray)
+                self.ip_scan_states.pop(ip, None)
+                self.completed_ips.add(ip)
+                self.save_scan_checkpoint()
+                self.update_status()
+                continue
+
+            if msg[0] == "port_done":
+                _, ip, target_port, tcp_delay, xray_delay, xray_ok = msg
+                state = self.ip_scan_states.get(ip)
+                if state is None:
+                    continue
+
+                state["pending"] -= 1
+                if xray_ok and xray_delay is not None:
+                    state["ports"].append((target_port, tcp_delay, xray_delay))
+                    if (
+                        state["best_delay"] is None
+                        or xray_delay < state["best_delay"]
+                    ):
+                        state["best_delay"] = xray_delay
+                        state["best_tcp"] = tcp_delay
+
+                if state["pending"] <= 0:
+                    self.tested += 1
+                    valid = state["ports"]
+                    if valid:
+                        self.success += 1
+                        valid.sort(key=lambda x: x[2])
+                        ports = [x[0] for x in valid]
+                        self._display_ip_result(
+                            ip,
+                            ports,
+                            state["best_tcp"],
+                            state["best_delay"]
+                        )
+                    # TCP 成功但 Xray 实测失败的节点不进入主列表。
+                    # 主列表只显示真正通过 Xray 实测的可用节点。
+                    self.ip_scan_states.pop(ip, None)
+                    self.completed_ips.add(ip)
+                    self.save_scan_checkpoint()
+                    self.update_status()
+
+        if (
+            self.running
+            and self.tested >= self.total
+            and self.total > 0
+        ):
+            self.finish_scan()
+
+        self.root.after(80, self.update_results)
+
+    def _display_ip_result(self, ip, ports, tcp_delay, xray_delay):
+        values = (
+            ip,
+            ", ".join(str(p) for p in ports),
+            f"{tcp_delay:.1f} ms" if isinstance(tcp_delay, (int, float)) else "-",
+            f"{xray_delay} ms" if xray_delay is not None else "失败",
+            "测速"
+        )
+
+        row_tag = "good"
+        if not self.tree.exists(ip):
+            self.tree.insert(
+                "", "end", iid=ip, values=values, tags=(row_tag,)
+            )
+        else:
+            old = list(self.tree.item(ip)["values"])
+            speed = old[4] if len(old) >= 5 else "测速"
+            values = values[:4] + (speed,)
+            self.tree.item(ip, values=values, tags=(row_tag,))
+
+    def update_status(self):
+        if self.running:
+            state_str = "打野中..."
+        elif self.resume_available and self.ip_list and self.tested < self.total:
+            state_str = "暂停"
+        else:
+            state_str = "就绪/完成"
+
+        if self.running and self.scan_start_time is not None:
+            elapsed = time.monotonic() - self.scan_start_time
+        else:
+            elapsed = self.scan_elapsed
+
+        total_seconds = max(0, int(elapsed))
+        hours, rem = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
+        elapsed_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        self.lbl_progress.config(
+            text=(
+                f"状态: {state_str} | "
+                f"进度: {self.tested}/{self.total} | "
+                f"捕获可用节点: {self.success} | "
+                f"扫描用时: {elapsed_text}"
+            )
+        )
+
+    def update_scan_timer(self):
+        if self.closing:
+            return
+        if self.running and self.scan_start_time is not None:
+            self.scan_elapsed = time.monotonic() - self.scan_start_time
+            self.update_status()
+            self.root.after(500, self.update_scan_timer)
+
+    # ========================================================
+    # 表头点击排序
+    # ========================================================
+
+    def sort_by_column(self, column):
+        if self.sort_column == column:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_column = column
+            self.sort_reverse = False
+
+        items = []
+        for iid in self.tree.get_children(""):
+            values = self.tree.item(iid)["values"]
+            tags = self.tree.item(iid)["tags"]
+            items.append((self._sort_key(column, values), iid, values, tags))
+
+        items.sort(key=lambda x: x[0], reverse=self.sort_reverse)
+        for index, (_, iid, _, _) in enumerate(items):
+            self.tree.move(iid, "", index)
+
+        self._update_heading_indicators(column)
+
+    def _sort_key(self, column, values):
+        try:
+            if column == "ip":
+                parts = str(values[0]).strip().split(".")
+                if len(parts) == 4:
+                    return tuple(int(p) for p in parts)
+                return (999, 999, 999, 999)
+
+            if column == "ports":
+                text = str(values[1]).replace("，", ",").strip()
+                ports = []
+                for p in text.split(","):
+                    p = p.strip()
+                    if p.isdigit():
+                        ports.append(int(p))
+                return tuple(sorted(ports)) if ports else (99999,)
+
+            if column == "tcp":
+                text = str(values[2]).strip()
+                if text.endswith(" ms"):
+                    return (0, float(text[:-3].strip()))
+                return (1, 99999.0)
+
+            if column == "xray":
+                text = str(values[3]).strip()
+                if text.endswith(" ms"):
+                    return (0, float(text[:-3].strip()))
+                return (1, 99999.0)
+
+            if column == "speed":
+                text = str(values[4]).strip() if len(values) >= 5 else "-"
+                if text.endswith(" MB/s"):
+                    return (0, float(text[:-5].strip()) * 1024 * 1024)
+                if text.endswith(" KB/s"):
+                    return (0, float(text[:-5].strip()) * 1024)
+                return (1, 999999999.0)
+        except Exception:
+            pass
+        return (1, 999999999.0)
+
+    def _update_heading_indicators(self, active_column):
+        titles = {
+            "ip": "IP 地址",
+            "ports": "可用端口",
+            "tcp": "TCP 延迟",
+            "xray": "Xray 真延迟",
+            "speed": "下载测速"
+        }
+        arrow = " ▼" if self.sort_reverse else " ▲"
+        for col, title in titles.items():
+            self.tree.heading(
+                col,
+                text=title + (arrow if col == active_column else ""),
+                command=lambda c=col: self.sort_by_column(c)
+            )
+
+    # ========================================================
+    # 双击单独刷新
+    # ========================================================
+
+    def on_item_double_click(self, event):
+        # 直接以双击位置确定行。第五列只做下载测速，其他列保持原来的延迟重测。
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+
+        self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+
+        column = self.tree.identify_column(event.x)
+        if column == "#5":
+            values = self.tree.item(item_id)["values"]
+            if len(values) < 4:
+                return
+
+            ip = str(values[0]).strip()
+            port_text = str(values[1]).strip()
+            ports = []
+            for raw_port in port_text.replace("，", ",").split(","):
+                try:
+                    p = int(raw_port.strip())
+                    if 1 <= p <= 65535 and p not in ports:
+                        ports.append(p)
+                except Exception:
+                    pass
+
+            if not ports:
+                return
+
+            # 可用端口已经按 Xray 真延迟排序，第一项为当前最佳端口。
+            threading.Thread(
+                target=self.download_speed_test,
+                args=(ip, ports[0], item_id),
+                daemon=True
+            ).start()
+            return
+
+        self.retest_selected_ip()
+
+    def retest_selected_ip(self):
+        selected = self.tree.selection()
+        if not selected:
+            return
+
+        item_id = selected[0]
+        values = self.tree.item(item_id)["values"]
+        if not values:
+            return
+
+        ip = str(values[0]).strip()
+        port_text = str(values[1]).strip() if len(values) > 1 else ""
+        ports = []
+        for raw in port_text.replace("，", ",").split(","):
+            try:
+                p = int(raw.strip())
+                if 1 <= p <= 65535 and p not in ports:
+                    ports.append(p)
+            except Exception:
+                pass
+
+        if not ports:
+            ports = list(self.scan_ports)
+
+        threading.Thread(
+            target=self.background_retest_single,
+            args=(ip, ports, item_id),
+            daemon=True
+        ).start()
+
+    def background_retest_single(self, ip, ports, item_id):
+        # 重测期间不要把“原来可用的端口”继续显示成当前可用端口，
+        # 避免出现“失败 + 五个端口可用”这种矛盾状态。
+        self.root.after(
+            0,
+            lambda: self.tree.item(
+                item_id,
+                values=(ip, "测试中...", "重新测试中...", "Xray测速中...", "-"),
+                tags=("testing",)
+            )
+        )
+
+        valid = []
+        for port in ports:
+            tcp_delay, tcp_ok = self.test_tcp(ip, port)
+            if not tcp_ok:
+                continue
+            try:
+                xray_delay, xray_ok = self.run_isolated_xray_test(ip, port, manual_retest=True)
+            except Exception as e:
+                print("独立重测异常:", e)
+                xray_delay, xray_ok = None, False
+            if xray_ok and xray_delay is not None:
+                valid.append((port, tcp_delay, xray_delay))
+
+        if valid:
+            valid.sort(key=lambda x: x[2])
+            best = valid[0]
+            values = (
+                ip,
+                ", ".join(str(x[0]) for x in valid),
+                f"{best[1]} ms",
+                f"{best[2]} ms",
+                "测速"
+            )
+            self.root.after(
+                0,
+                lambda: self.tree.item(item_id, values=values, tags=("good",))
+                if self.tree.exists(item_id) else None
+            )
+        else:
+            self.root.after(
+                0,
+                lambda: self.tree.item(
+                    item_id,
+                    values=(ip, "无可用端口", "失败", "失败", "-"),
+                    tags=("fail",)
+                ) if self.tree.exists(item_id) else None
+            )
+
+    # ========================================================
+    # CF 上传功能
+    # ========================================================
+
+    # ========================================================
+    # Cloudflare 六账户 Workers 请求额度
+    # ========================================================
+
+    def load_cf_quota_config(self):
+        """读取额度后台连接配置；客户端不保存六个 Cloudflare Account ID / Token。"""
+        base = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base, CF_QUOTA_FILE)
+        default = {
+            "backend_url": "",
+            "username": "",
+            "password": "",
+            "remember": False,
+            "schedule_mode": "balance",
+            "reserve_account1": 5000,
+            "reserve_accounts2_6": 5,
+            "balance_rotation_percent": 5,
+        }
+
+        try:
+            if not os.path.isfile(path):
+                return default
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return default
+            return {
+                "backend_url": str(data.get("backend_url", "")).strip().rstrip("/"),
+                "username": str(data.get("username", "")).strip(),
+                "password": str(data.get("password", "")),
+                "remember": bool(data.get("remember", False)),
+                "schedule_mode": "drain" if str(data.get("schedule_mode", "balance")).lower() == "drain" else "balance",
+                "reserve_account1": 5000,
+                "reserve_accounts2_6": max(0, min(100, int(data.get("reserve_accounts2_6", 5) or 5))),
+                "balance_rotation_percent": (
+                    int(data.get("balance_rotation_percent", 5) or 5)
+                    if int(data.get("balance_rotation_percent", 5) or 5) in (3, 5, 10, 15, 20)
+                    else 5
+                ),
+            }
+        except Exception as e:
+            print("读取 CF 额度后台配置失败:", e)
+            return default
+
+    def save_cf_quota_config(self, config):
+        base = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base, CF_QUOTA_FILE)
+        try:
+            safe = {
+                "backend_url": str(config.get("backend_url", "")).strip().rstrip("/"),
+                "username": str(config.get("username", "")).strip(),
+                "password": str(config.get("password", "")) if config.get("remember") else "",
+                "remember": bool(config.get("remember", False)),
+                "schedule_mode": "drain" if str(config.get("schedule_mode", "balance")).lower() == "drain" else "balance",
+                "reserve_account1": 5000,
+                "reserve_accounts2_6": max(0, min(100, int(config.get("reserve_accounts2_6", 5) or 5))),
+                "balance_rotation_percent": (
+                    int(config.get("balance_rotation_percent", 5) or 5)
+                    if int(config.get("balance_rotation_percent", 5) or 5) in (3, 5, 10, 15, 20)
+                    else 5
+                ),
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(safe, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            print("保存 CF 额度后台配置失败:", e)
+            return False
+
+    def _normalize_cf_quota_backend_url(self, backend_url):
+        """额度后台只需要填写域名；内部自动补 https:// 并定位到根地址。"""
+        value = str(backend_url or "").strip()
+        if not value:
+            return ""
+        if not re.match(r"^https?://", value, re.I):
+            value = "https://" + value
+        parsed = urllib.parse.urlsplit(value)
+        if not parsed.netloc:
+            raise RuntimeError("额度后台地址格式错误，请填写实际配置的后台域名")
+        return f"{parsed.scheme.lower()}://{parsed.netloc}"
+
+    def _cf_quota_login_and_query(self, backend_url, username, password, progress_callback=None):
+        """登录账户1后台，然后由账户1后台统一返回账户1~6额度。"""
+        backend_url = self._normalize_cf_quota_backend_url(backend_url)
+        if not backend_url:
+            raise RuntimeError("请先填写额度后台地址")
+        if not password:
+            raise RuntimeError("请先填写后台密码")
+
+        cookie_jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(cookie_jar)
+        )
+
+        # 同一个后台地址 + 密码在本次程序运行期间只登录一次。
+        # 返回再进入额度页面时直接复用已登录状态，不再重复调用 /login。
+        login_key = (backend_url, password)
+        if not self.cf_quota_logged_in or self.cf_quota_login_key != login_key:
+            # 当前 workers.js 的 /login 按原 CF账户按钮方式只提交 password。            # 登录名仅作为界面兼容字段，不参与实际登录请求。
+            login_data = urllib.parse.urlencode({
+                "password": password,
+            }).encode("utf-8")
+
+            login_request = urllib.request.Request(
+                backend_url + "/login",
+                data=login_data,
+                method="POST",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                    "User-Agent": "CF-IP-Scanner/1.0",
+                },
+            )
+
+            with opener.open(login_request, timeout=15) as response:
+                login_body = response.read().decode("utf-8-sig", errors="replace")
+
+            try:
+                login_json = json.loads(login_body)
+            except Exception:
+                login_json = {}
+
+            if not login_json.get("success"):
+                self.cf_quota_logged_in = False
+                self.cf_quota_login_key = None
+                raise RuntimeError("额度后台登录失败，请检查后台地址和密码")
+
+            self.cf_quota_logged_in = True
+            self.cf_quota_login_key = login_key
+
+        usage_request = urllib.request.Request(
+            backend_url + "/admin/get6AccountUsage?mode=" + urllib.parse.quote(self.cf_schedule_mode),
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "CF-IP-Scanner/1.0",
+            },
+        )
+
+        # 当前 workers.js 的 admin 接口支持 X-Admin-Password，
+        # 这里直接带密码请求，避免 Cookie 在某些环境下没有被正确保留。
+        usage_request.add_header("X-Admin-Password", password)
+
+        try:
+            with opener.open(usage_request, timeout=20) as response:
+                body = response.read().decode("utf-8-sig", errors="replace")
+                status_code = response.getcode()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8-sig", errors="replace").strip()[:300]
+            raise RuntimeError(
+                f"六账户接口返回 HTTP {e.code}"
+                + (f"：{detail}" if detail else "")
+            ) from e
+
+        if status_code != 200:
+            detail = body.strip()[:300]
+            raise RuntimeError(
+                f"六账户接口返回 HTTP {status_code}"
+                + (f"：{detail}" if detail else "")
+            )
+
+        body_clean = body.strip().lstrip("\ufeff")
+        if not body_clean:
+            raise RuntimeError("六账户接口返回空内容：后台没有返回额度数据")
+
+        try:
+            data = json.loads(body_clean)
+        except Exception as e:
+            detail = body_clean[:300].replace("\r", " ").replace("\n", " ")
+            raise RuntimeError(
+                f"六账户接口返回的不是有效 JSON：{detail}"
+            ) from e
+        if not data.get("success"):
+            raise RuntimeError(
+                str(data.get("error") or data.get("msg") or "六账户额度读取失败")
+            )
+
+        accounts = data.get("accounts")
+        if not isinstance(accounts, list) or len(accounts) != 6:
+            raise RuntimeError("后台没有返回完整的账户1~6数据")
+
+
+        return data
+
+    def _refresh_cf_active_row(self, dialog, backend_url, password):
+        """仅快速刷新当前正在使用账户的今日请求/剩余，不改变完整六账户刷新周期。"""
+        if self.closing or self.cf_quota_dialog is not dialog or self.cf_quota_active_refreshing:
+            return
+        if not backend_url or not password:
+            return
+
+        self.cf_quota_active_refreshing = True
+
+        def worker():
+            try:
+                data = self._cf_quota_login_and_query(backend_url, "", password)
+                accounts = data.get("accounts", [])
+                with self.cf_schedule_lock:
+                    active_account = int(getattr(self, "cf_current_account", 6) or 6)
+                idx = active_account - 1
+                if 0 <= idx < len(accounts):
+                    item = accounts[idx] or {}
+                    used = int(item.get("todayUsed", 0) or 0)
+                    remain = int(item.get("todayRemaining", 0) or 0)
+                    limit = int(item.get("todayLimit", 0) or 0)
+                    def apply():
+                        if self.closing or self.cf_quota_dialog is not dialog:
+                            return
+                        if idx < len(self.cf_quota_rows):
+                            row = self.cf_quota_rows[idx]
+                            row["requests"].set(f"{used:,}")
+                            row["remain"].set(f"{remain:,}")
+                            row["limit"].set(f"{limit:,}")
+                    self.root.after(0, apply)
+            except Exception:
+                pass
+            finally:
+                self.cf_quota_active_refreshing = False
+                if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog:
+                    try:
+                        self.cf_quota_active_refresh_after_id = dialog.after(
+                            1000,
+                            lambda: self._refresh_cf_active_row(dialog, backend_url, password)
+                            if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog
+                            else None
+                        )
+                    except Exception:
+                        self.cf_quota_active_refresh_after_id = None
+
+    def open_cf_quota_manager(self):
+        """六账户额度配置：直接覆盖主IP列表区域，不创建浮动窗口。"""
+        # 两个配置页互斥：打开 CF 配置前，先自动返回 IP 主窗口。
+        try:
+            if getattr(self, "config_mode", False):
+                self.close_node_config()
+        except Exception:
+            pass
+
+        if self.cf_quota_dialog is not None and self.cf_quota_dialog.winfo_exists():
+            self.cf_quota_dialog.lift()
+            return
+
+        # 直接覆盖主 IP 列表区域
+        tree_area = self.tree.master
+        dialog = tk.Frame(
+            tree_area,
+            bd=0,
+            relief="flat",
+            bg="#f4f4f4",
+            highlightthickness=0
+        )
+        self.cf_quota_dialog = dialog
+        dialog.place(relx=0, rely=0, relwidth=1, relheight=1)
+        dialog.lift()
+
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(
+            frame,
+            text="CF额度后台",
+            font=("Microsoft YaHei UI", 11, "bold")
+        ).pack(anchor="w", pady=(0, 8))
+
+        form = ttk.Frame(frame)
+        form.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(form, text="后台地址：").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
+        backend_saved = str(self.cf_quota_accounts.get("backend_url", "")).strip()
+        if backend_saved and re.match(r"^https?://", backend_saved, re.I):
+            parsed_saved = urllib.parse.urlsplit(backend_saved)
+            backend_saved = parsed_saved.netloc or backend_saved
+        else:
+            backend_saved = backend_saved.split("/", 1)[0]
+        backend_var = tk.StringVar(value=backend_saved)
+        backend_entry = ttk.Entry(form, textvariable=backend_var, width=58)
+        backend_entry.grid(row=0, column=1, columnspan=3, sticky="ew", pady=4)
+
+        ttk.Label(form, text="登录名：").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        username_var = tk.StringVar(value=self.cf_quota_accounts.get("username", ""))
+        username_entry = ttk.Entry(form, textvariable=username_var, width=24)
+        username_entry.grid(row=1, column=1, sticky="w", pady=4)
+
+        ttk.Label(form, text="密码：").grid(row=1, column=2, sticky="e", padx=(12, 6), pady=4)
+        password_var = tk.StringVar(
+            value=self.cf_quota_accounts.get("password", "")
+            if self.cf_quota_accounts.get("remember")
+            else ""
+        )
+        password_entry = ttk.Entry(form, textvariable=password_var, width=24, show="*")
+        password_entry.grid(row=1, column=3, sticky="w", pady=4)
+
+        remember_var = tk.BooleanVar(value=bool(self.cf_quota_accounts.get("remember")))
+        ttk.Checkbutton(
+            form,
+            text="保存登录信息",
+            variable=remember_var
+        ).grid(row=2, column=1, sticky="w", pady=(2, 6))
+
+        login_status_var = tk.StringVar(value="登录状态：未登录")
+        login_status_label = ttk.Label(
+            form,
+            textvariable=login_status_var
+        )
+        login_status_label.grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(2, 6))
+        def set_login_status(text, logged_in=False):
+            login_status_var.set("登录状态：" + text)
+            try:
+                login_status_label.configure(foreground="#000000" if logged_in else "#d00000")
+            except Exception:
+                pass
+        set_login_status("已登录" if self.cf_quota_logged_in else "未登录", self.cf_quota_logged_in)
+
+        table = ttk.Frame(frame)
+        table.pack(fill="both", expand=True)
+
+        headers = ["账户", "今日请求", "今日剩余", "UUID", "SNI"]
+        widths = [8, 12, 12, 34, 24]
+        for col, (title, width) in enumerate(zip(headers, widths)):
+            ttk.Label(
+                table, text=title, anchor="center", width=width
+            ).grid(row=0, column=col, padx=2, pady=(0, 6), sticky="ew")
+
+        self.cf_quota_rows = []
+        for i in range(6):
+            name_var = tk.StringVar(value=f"账户{i + 1}")
+            requests_var = tk.StringVar(value="—")
+            remain_var = tk.StringVar(value="—")
+            limit_var = tk.StringVar(value="—")
+            node = self.node_configs[i] if i < len(self.node_configs) else {}
+            uuid_var = tk.StringVar(value=str(node.get("uuid", "")).strip() or "—")
+            snis = node.get("snis", [])
+            if not isinstance(snis, list): snis = [str(node.get("sni", "")).strip()] if node.get("sni") else []
+            sni_var = tk.StringVar(value=" | ".join([str(x).strip() for x in snis if str(x).strip()]) or "—")
+
+            ttk.Label(table, textvariable=name_var, anchor="center", width=widths[0]).grid(
+                row=i + 1, column=0, padx=2, pady=3
+            )
+            ttk.Label(table, textvariable=requests_var, anchor="center", width=widths[1]).grid(
+                row=i + 1, column=1, padx=2, pady=3
+            )
+            ttk.Label(table, textvariable=remain_var, anchor="center", width=widths[2]).grid(
+                row=i + 1, column=2, padx=2, pady=3
+            )
+            ttk.Label(table, textvariable=uuid_var, anchor="center", width=widths[3]).grid(
+                row=i + 1, column=3, padx=2, pady=3
+            )
+            sni_label = ttk.Label(table, textvariable=sni_var, anchor="center", width=widths[4])
+            sni_label.grid(
+                row=i + 1, column=4, padx=2, pady=3
+            )
+
+            self.cf_quota_rows.append({
+                "name": name_var,
+                "requests": requests_var,
+                "remain": remain_var,
+                "limit": limit_var,
+                "uuid": uuid_var,
+                "sni": sni_var,
+                "sni_label": sni_label,
+            })
+
+        bottom = ttk.Frame(frame)
+        bottom.pack(fill="x", pady=(10, 0))
+
+        total_var = tk.StringVar(value="")
+        ttk.Label(bottom, textvariable=total_var, width=34).pack(side="left")
+
+        schedule_mode_var = tk.BooleanVar(value=self.cf_schedule_mode == "drain")
+        schedule_mode_text = tk.StringVar(value="放干模式" if schedule_mode_var.get() else "平衡模式")
+        def sync_schedule_settings():
+            threading.Thread(
+                target=self._sync_cf_schedule_to_worker,
+                args=(
+                    backend_var.get().strip(),
+                    password_var.get(),
+                    self.cf_schedule_mode,
+                    5,
+                    self.cf_reserve_accounts2_6,
+                    self.cf_balance_rotation_percent,
+                ),
+                daemon=True
+            ).start()
+
+        def on_schedule_mode_change():
+            self.cf_schedule_mode = "drain" if schedule_mode_var.get() else "balance"
+            schedule_mode_text.set("放干模式" if schedule_mode_var.get() else "平衡模式")
+            self.cf_quota_accounts["schedule_mode"] = self.cf_schedule_mode
+            self.cf_quota_accounts["balance_rotation_percent"] = self.cf_balance_rotation_percent
+            self.save_cf_quota_config(self.cf_quota_accounts)
+            sync_schedule_settings()
+
+        def on_rotation_change(event=None):
+            try:
+                value = int(rotation_var.get().replace("%", "").strip())
+            except Exception:
+                value = 5
+            if value not in (3, 5, 10, 15, 20):
+                value = 5
+            self.cf_balance_rotation_percent = value
+            rotation_var.set(f"{value}%")
+            self.cf_quota_accounts["balance_rotation_percent"] = value
+            self.save_cf_quota_config(self.cf_quota_accounts)
+            sync_schedule_settings()
+        mode_box = ttk.Frame(bottom)
+        mode_box.pack(side="left", padx=(18, 0))
+        ttk.Checkbutton(
+            mode_box,
+            textvariable=schedule_mode_text,
+            variable=schedule_mode_var,
+            command=on_schedule_mode_change
+        ).pack(side="left")
+
+        rotation_box = ttk.Frame(bottom)
+        rotation_box.pack(side="left", padx=(12, 0))
+        ttk.Label(rotation_box, text="轮换").pack(side="left")
+        rotation_values = ("3%", "5%", "10%", "15%", "20%")
+        rotation_var = tk.StringVar(value=f"{self.cf_balance_rotation_percent}%")
+        rotation_combo = ttk.Combobox(
+            rotation_box,
+            textvariable=rotation_var,
+            values=rotation_values,
+            state="readonly",
+            width=5
+        )
+        rotation_combo.pack(side="left", padx=(3, 0))
+        rotation_combo.bind("<<ComboboxSelected>>", on_rotation_change)
+
+        reserve_box = ttk.Frame(bottom)
+        reserve_box.pack(side="left", padx=(12, 0))
+        ttk.Label(reserve_box, text="账户1：5000-10000").pack(side="left")
+        ttk.Label(reserve_box, text="  账户2-6保留").pack(side="left", padx=(8, 0))
+        reserve26_var = tk.StringVar(value=str(self.cf_reserve_accounts2_6))
+        ttk.Entry(reserve_box, textvariable=reserve26_var, width=4).pack(side="left", padx=(3, 0))
+        ttk.Label(reserve_box, text="%").pack(side="left")
+
+        def on_close():
+            # 先把入口恢复，再清理当前页面。这样连续“CF配置→返回”时，
+            # 即使后台刷新线程刚好回调，也不会把按钮重新绑定到旧页面。
+            self.quota_button.config(text="CF配置", command=self.open_cf_quota_manager)
+
+            # 先失效当前页面引用，所有旧刷新回调都会被身份检查拦截。
+            if self.cf_quota_dialog is dialog:
+                self.cf_quota_dialog = None
+            self.cf_quota_refreshing = False
+
+            try:
+                if self.cf_quota_refresh_after_id is not None:
+                    dialog.after_cancel(self.cf_quota_refresh_after_id)
+            except Exception:
+                pass
+            self.cf_quota_refresh_after_id = None
+
+            # 立即隐藏 CF 页面，保证马上回到 IP 主窗口。
+            try:
+                dialog.place_forget()
+            except Exception:
+                pass
+            try:
+                self.config_overlay.place_forget()
+                self.config_mode = False
+                self.config_readonly = False
+                self.tree.lift()
+                # CF 配置页覆盖 Treeview 时会把右侧滚动条压到下面；
+                # 返回主界面后重新提升滚动条，确保它立即可见。
+                try:
+                    self.tree_scrollbar.lift()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            # 延后一拍销毁旧页面，避免当前 Tk 回调链中途销毁自身造成
+            # 连续点击时出现“返回失效”。
+            try:
+                dialog.after_idle(lambda: dialog.destroy() if dialog.winfo_exists() else None)
+            except Exception:
+                pass
+        self.quota_button.config(text="返回", command=on_close)
+
+        save_button = ttk.Button(bottom, text="保存配置", width=11)
+        save_button.pack(side="right", padx=(6, 0))
+
+
+        def save_config():
+            config = {
+                "backend_url": backend_var.get().strip().rstrip("/"),
+                "username": username_var.get().strip(),
+                "password": password_var.get(),
+                "remember": bool(remember_var.get()),
+                "schedule_mode": self.cf_schedule_mode,
+                "reserve_account1": 5000,
+                "reserve_accounts2_6": max(0, min(100, int(reserve26_var.get().strip() or 3))),
+                "balance_rotation_percent": self.cf_balance_rotation_percent,
+            }
+            if not config["backend_url"]:
+                messagebox.showwarning("提示", "请填写额度后台地址。", parent=dialog)
+                return
+            if self.save_cf_quota_config(config):
+                self.cf_quota_accounts = config
+                self.cf_reserve_accounts2_6 = config["reserve_accounts2_6"]
+                self.cf_balance_rotation_percent = config["balance_rotation_percent"]
+                threading.Thread(
+                    target=self._sync_cf_schedule_to_worker,
+                    args=(
+                        config["backend_url"],
+                        config["password"],
+                        config["schedule_mode"],
+                        5,
+                        config["reserve_accounts2_6"],
+                        config["balance_rotation_percent"],
+                    ),
+                    daemon=True
+                ).start()
+                if not config["remember"]:
+                    password_var.set("")
+                messagebox.showinfo("提示", "额度后台配置已保存，调度设置正在同步。", parent=dialog)
+            else:
+                messagebox.showerror("错误", "额度后台配置保存失败。", parent=dialog)
+
+        def refresh():
+            if self.cf_quota_dialog is not dialog:
+                return
+            self.cf_quota_refresh_after_id = None
+            if self.cf_quota_refreshing:
+                return
+
+            backend_url = backend_var.get().strip().rstrip("/")
+            username = username_var.get().strip()
+            password = password_var.get()
+
+            if not backend_url:
+                messagebox.showwarning("提示", "请先填写额度后台地址。", parent=dialog)
+                return
+            if not password:
+                messagebox.showwarning("提示", "请先填写后台密码。", parent=dialog)
+                return
+
+            self.cf_quota_accounts = {
+                "backend_url": backend_url,
+                "username": username,
+                "password": password if remember_var.get() else "",
+                "remember": bool(remember_var.get()),
+            }
+
+            self.cf_quota_refreshing = True
+
+            # 刷新时保留当前表格内容，不清空、不显示“读取中…”。
+            # 新数据返回后直接覆盖对应数值。
+            def progress_callback(message):
+                if dialog.winfo_exists():
+                    try:
+                        dialog.after(0, lambda m=message: login_status_var.set("登录状态：" + m))
+                    except Exception:
+                        pass
+
+            threading.Thread(
+                target=self._refresh_cf_quota_worker,
+                args=(dialog, total_var, backend_url, username, password, progress_callback, login_status_var, login_status_label, refresh),
+                daemon=True
+            ).start()
+
+        save_button.config(command=save_config)
+
+        # 打开后立即尝试读取一次；之后每 30 秒自动刷新。
+        refresh()
+
+    def _refresh_cf_quota_worker(
+        self, dialog, total_var,
+        backend_url, username, password, progress_callback=None, login_status_var=None, login_status_label=None, refresh_callback=None
+    ):
+        try:
+            data = self._cf_quota_login_and_query(
+                backend_url, username, password, progress_callback=progress_callback
+            )
+            self._last_cf_quota_data = data
+            accounts = data.get("accounts", [])
+            total_requests = int(data.get("todayUsedTotal", 0) or 0)
+            total_remaining = int(data.get("todayRemainingTotal", 0) or 0)
+            results = []
+
+            for i in range(6):
+                item = accounts[i] if i < len(accounts) else {}
+                used = int(item.get("todayUsed", 0) or 0)
+                remain = int(item.get("todayRemaining", 0) or 0)
+                limit = int(item.get("todayLimit", 0) or 0)
+                results.append((i, used, remain, limit, None))
+
+        except Exception as e:
+            results = [(i, None, None, None, str(e)) for i in range(6)]
+            total_requests = None
+            total_remaining = None
+
+        def set_login_status(text, logged_in=False):
+            if login_status_var is not None:
+                login_status_var.set("登录状态：" + text)
+            if login_status_label is not None:
+                try:                    login_status_label.configure(foreground="#000000" if logged_in else "#d00000")
+                except Exception:
+                    pass
+
+        def apply_results():
+            if self.closing:
+                return
+
+            for i, used, remain, limit, error in results:
+                if i >= len(self.cf_quota_rows):
+                    continue
+                row = self.cf_quota_rows[i]
+
+                if error:
+                    # 读取失败时保留原来的数值，只更新状态。
+                    row["sni"].set(row["sni"].get() or "—")
+                    continue
+
+                row["name"].set(f"账户{i + 1}")
+                row["requests"].set(f"{used:,}")
+                row["remain"].set(f"{remain:,}")
+                row["limit"].set(f"{limit:,}")
+                row["sni"].set(row["sni"].get() or "—")
+
+            if total_requests is not None:
+                self._set_cf_schedule(getattr(self, "_last_cf_quota_data", {}))
+                # 直接给 SNI 列着色：
+                # 绿色 = 当前正在使用；黄色 = 到达保留/限制点；红色 = 已放干。
+                with self.cf_schedule_lock:
+                    active_account = int(getattr(self, "cf_current_account", 6) or 6)
+                for i, row in enumerate(self.cf_quota_rows):
+                    if results[i][4] is None:
+                        remain_value = results[i][2]
+                        account_no = i + 1
+                        limit_value = results[i][3]
+                        if account_no == 1:
+                            reserve_value = self.cf_account1_min_remaining
+                        else:
+                            reserve_value = (
+                                int(limit_value * self.cf_reserve_accounts2_6 / 100)
+                                if limit_value is not None
+                                else 0
+                            )
+
+                        try:
+                            if remain_value is not None and remain_value <= 0:
+                                row["sni_label"].configure(foreground="#d00000")
+                            elif remain_value is not None and remain_value <= reserve_value:
+                                row["sni_label"].configure(foreground="#d4a000")
+                            elif account_no == active_account and remain_value is not None and remain_value > 0:
+                                row["sni_label"].configure(foreground="#008000")
+                            else:
+                                row["sni_label"].configure(foreground="#333333")
+                        except Exception:
+                            pass
+
+            if total_requests is None:
+                error_text = next((x[4] for x in results if x[4]), "未知错误")
+                error_lower = str(error_text).lower()
+                if "登录失败" in str(error_text) or "http 401" in error_lower or "http 403" in error_lower:
+                    self.cf_quota_logged_in = False
+                    self.cf_quota_login_key = None
+                    set_login_status("未登录", False)
+                total_var.set("")
+            else:
+                set_login_status("已登录", True)
+                total_var.set("")
+
+            self.cf_quota_refreshing = False
+
+            # 当前正在使用的 SNI 单独快速刷新：每 1 秒更新该账户的今日请求/今日剩余。
+            # 六账户完整刷新仍保持原来的 5 秒周期。
+            try:
+                if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog:
+                    self.cf_quota_active_refresh_after_id = dialog.after(
+                        1000,
+                        lambda: self._refresh_cf_active_row(dialog, backend_url, password)
+                        if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog
+                        else None
+                    )
+            except Exception:
+                self.cf_quota_active_refresh_after_id = None
+
+            # 自动刷新：记录 after ID；关闭窗口时会明确取消，避免返回后又触发一次登录。
+            if dialog.winfo_exists() and not self.closing and self.cf_quota_dialog is dialog:
+                try:
+                    self.cf_quota_refresh_after_id = dialog.after(
+                        CF_QUOTA_REFRESH_SECONDS * 1000,
+                        lambda: refresh_callback()
+                        if dialog.winfo_exists() and not self.cf_quota_refreshing and self.cf_quota_dialog is dialog and refresh_callback is not None
+                        else None
+                    )
+                except Exception:
+                    self.cf_quota_refresh_after_id = None
+
+        if dialog.winfo_exists():
+            self.root.after(0, apply_results)
+        else:
+            self.cf_quota_refreshing = False
+
+    def get_cf_account_config(self):
+        base = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base, CF_PASSWORD_FILE)
+
+        try:
+            if not os.path.isfile(path):
+                return {"username": "", "password": ""}
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            return {
+                "username": str(data.get("username", "")),
+                "password": str(data.get("password", ""))
+            }
+        except Exception:
+            return {"username": "", "password": ""}
+
+    def get_cf_saved_password(self):
+        return self.get_cf_account_config().get("password", "")
+
+    def save_cf_account(self, username, password):
+        base = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base, CF_PASSWORD_FILE)
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "username": username,
+                        "password": password
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2
+                )
+            return True
+        except Exception as e:
+            print("保存 CF 账户失败:", e)
+            return False
+
+    def save_cf_password(self, password):
+        old = self.get_cf_account_config()
+        return self.save_cf_account(old.get("username", ""), password)
+
+    def delete_cf_saved_password(self):
+        base = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base, CF_PASSWORD_FILE)
+
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+    def open_cf_account_manager(self):
+        """CF账户管理：可切换账户、保存/取消保存本机登录信息。"""
+        saved = self.get_cf_account_config()
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("CF 账户管理")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+
+        # 居中到软件主窗口内部，而不是居中到整个屏幕。
+        dialog.update_idletasks()
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+        dialog_w = dialog.winfo_width()
+        dialog_h = dialog.winfo_height()
+        pos_x = root_x + max(0, (root_w - dialog_w) // 2)
+        pos_y = root_y + max(0, (root_h - dialog_h) // 2)
+        dialog.geometry(f"+{pos_x}+{pos_y}")
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding=15)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="管理账户:").grid(
+            row=0, column=0, sticky="e", padx=(0, 8), pady=(0, 10)
+        )
+
+        username_var = tk.StringVar(value=saved.get("username", ""))
+        username_entry = ttk.Entry(
+            frame, textvariable=username_var, width=30
+        )
+        username_entry.grid(row=0, column=1, pady=(0, 10))
+
+        ttk.Label(frame, text="管理员密码:").grid(
+            row=1, column=0, sticky="e", padx=(0, 8), pady=(0, 10)
+        )
+
+        password_var = tk.StringVar(value=saved.get("password", ""))
+        password_entry = ttk.Entry(
+            frame, textvariable=password_var, width=30, show="*"
+        )
+        password_entry.grid(row=1, column=1, pady=(0, 10))
+
+        save_var = tk.BooleanVar(value=bool(saved.get("password", "")))
+        ttk.Checkbutton(
+            frame,
+            text="保存账户信息到本机",
+            variable=save_var
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 5))
+
+        ttk.Label(
+            frame,
+            text="取消保存会立即删除本机保存的账户信息。",
+            foreground="#666666"
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=4, column=0, columnspan=2)
+
+        def save_and_close():
+            username = username_var.get().strip()
+            password = password_var.get().strip()
+
+            if not password:
+                messagebox.showwarning(
+                    "提示", "管理员密码不能为空。", parent=dialog
+                )
+                return
+
+            if save_var.get():
+                if not self.save_cf_account(username, password):
+                    messagebox.showerror(
+                        "错误", "账户信息保存失败。", parent=dialog
+                    )
+                    return
+            else:
+                self.delete_cf_saved_password()
+
+            dialog.destroy()
+
+        def clear_saved():
+            self.delete_cf_saved_password()
+            username_var.set("")
+            password_var.set("")
+            save_var.set(False)
+            messagebox.showinfo(
+                "提示", "已取消保存并删除本机账户信息。", parent=dialog
+            )
+
+        def cancel():
+            dialog.destroy()
+
+        ttk.Button(
+            buttons, text="保存", width=10, command=save_and_close
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            buttons, text="取消保存", width=10, command=clear_saved
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            buttons, text="关闭", width=10, command=cancel
+        ).pack(side="left", padx=4)
+
+        dialog.bind("<Return>", lambda e: save_and_close())
+        dialog.bind("<Escape>", lambda e: cancel())
+
+        username_entry.focus_set()
+        self.root.wait_window(dialog)
+
+    def ask_cf_password(self):
+        saved = self.get_cf_account_config()
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("CF 登录")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+
+        # 居中到软件主窗口内部，而不是居中到整个屏幕。
+        dialog.update_idletasks()
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+        dialog_w = dialog.winfo_width()
+        dialog_h = dialog.winfo_height()
+        pos_x = root_x + max(0, (root_w - dialog_w) // 2)
+        pos_y = root_y + max(0, (root_h - dialog_h) // 2)
+        dialog.geometry(f"+{pos_x}+{pos_y}")
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding=15)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="CF 管理账户:").grid(
+            row=0, column=0, sticky="e", padx=(0, 8), pady=(0, 10)
+        )
+        username_var = tk.StringVar(value=saved.get("username", ""))
+        ttk.Entry(
+            frame, textvariable=username_var, width=30
+        ).grid(row=0, column=1, pady=(0, 10))
+
+        ttk.Label(frame, text="管理员密码:").grid(
+            row=1, column=0, sticky="e", padx=(0, 8), pady=(0, 10)
+        )
+        password_var = tk.StringVar(value=saved.get("password", ""))
+        entry = ttk.Entry(
+            frame, textvariable=password_var, width=30, show="*"
+        )
+        entry.grid(row=1, column=1, pady=(0, 10))
+        entry.focus_set()
+
+        save_var = tk.BooleanVar(value=bool(saved.get("password", "")))
+        ttk.Checkbutton(
+            frame, text="保存账户信息到本机", variable=save_var
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        result = {"password": None, "save": False, "username": ""}
+
+        def confirm():
+            password = password_var.get().strip()
+            if not password:
+                messagebox.showwarning(
+                    "提示", "请输入 CF 管理员密码。", parent=dialog
+                )
+                return
+            result["password"] = password
+            result["save"] = save_var.get()
+            result["username"] = username_var.get().strip()
+            dialog.destroy()
+
+        def cancel():
+            dialog.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, columnspan=2)
+        ttk.Button(buttons, text="登录", width=10, command=confirm).pack(side="left", padx=5)
+        ttk.Button(buttons, text="取消", width=10, command=cancel).pack(side="left", padx=5)
+
+        dialog.bind("<Return>", lambda e: confirm())
+        dialog.bind("<Escape>", lambda e: cancel())
+
+        self.root.wait_window(dialog)
+
+        if result["password"] is not None:
+            if result["save"]:
+                self.save_cf_account(result["username"], result["password"])
+            else:
+                self.delete_cf_saved_password()
+
+        return result["password"]
+
+    def collect_success_ips(self):
+        result = []
+        for item_id in self.tree.get_children(""):
+            values = self.tree.item(item_id)["values"]
+            if len(values) < 4:
+                continue
+            ip = str(values[0]).strip()
+            ports_text = str(values[1]).strip()
+            xray_value = str(values[3]).strip()
+            if not ip or not xray_value.endswith(" ms"):
+                continue
+            for raw_port in ports_text.replace("，", ",").split(","):
+                raw_port = raw_port.strip()
+                if raw_port.isdigit() and 1 <= int(raw_port) <= 65535:
+                    result.append(f"{ip}:{raw_port}")
+        return result
+
+    def upload_to_cf(self):
+        if self.running:
+            messagebox.showinfo(
+                "提示",
+                "扫描进行中，请先停止扫描再上传。"
+            )
+            return
+
+        nodes = self.collect_success_ips()
+
+        if not nodes:
+            messagebox.showinfo(
+                "提示",
+                "当前列表没有可上传的 Xray 成功节点。"
+            )
+            return
+
+        password = self.get_cf_saved_password()
+
+        if not password:
+            password = self.ask_cf_password()
+
+        if not password:
+            return
+        self.lbl_progress.config(
+            text=f"正在上传 {len(nodes)} 个节点到 CF..."
+        )
+
+        threading.Thread(
+            target=self._upload_to_cf_worker,
+            args=(nodes, password),
+            daemon=True
+        ).start()
+
+    def _upload_to_cf_worker(self, nodes, password):
+        try:
+            cookie_jar = http.cookiejar.CookieJar()
+
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(cookie_jar)
+            )
+
+            # 登录
+            login_data = urllib.parse.urlencode({
+                "password": password
+            }).encode("utf-8")
+
+            login_request = urllib.request.Request(
+                CF_LOGIN_URL,
+                data=login_data,
+                method="POST",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": "CF-IP-Scanner/1.0"
+                }
+            )
+
+            with opener.open(login_request, timeout=15) as response:
+                login_body = response.read().decode(
+                    "utf-8",
+                    errors="ignore"
+                )
+
+            try:
+                login_json = json.loads(login_body)
+            except Exception:
+                login_json = {}
+
+            if not login_json.get("success"):
+                raise RuntimeError("CF 登录失败，请检查管理员密码。")
+
+            # 上传
+            upload_text = "\n".join(nodes)
+
+            upload_request = urllib.request.Request(
+                CF_ADD_URL,
+                data=upload_text.encode("utf-8"),
+                method="POST",
+                headers={
+                    "Content-Type": "text/plain; charset=utf-8",
+                    "User-Agent": "CF-IP-Scanner/1.0"
+                }
+            )
+
+            with opener.open(upload_request, timeout=20) as response:
+                body = response.read().decode(
+                    "utf-8",
+                    errors="ignore"
+                )
+
+            try:
+                result_json = json.loads(body)
+            except Exception:
+                result_json = {}
+
+            if response.status != 200 or not result_json.get("success"):
+                message = result_json.get(
+                    "error",
+                    result_json.get("message", "CF 返回失败")
+                )
+                raise RuntimeError(str(message))
+
+            self.root.after(
+                0,
+                lambda: self._upload_success(len(nodes))
+            )
+
+        except Exception as e:
+            error_text = str(e)
+
+            self.root.after(
+                0,
+                lambda: self._upload_failed(error_text)
+            )
+
+    def _upload_success(self, count):
+        self.update_status()
+
+        # 上传成功属于正常提示，不占用 Xray 错误状态区域。
+        self.lbl_progress.config(
+            text=f"上传成功：已上传 {count} 个 Xray 可用节点到 CF"
+        )
+
+    def _upload_failed(self, error):
+        self.update_status()
+
+        messagebox.showerror(
+            "上传失败",
+            f"上传到 CF 失败：\n\n{error}"
+        )
+
+    # ========================================================
+    # 右键菜单
+    # ========================================================
+
+    def show_context_menu(self, event):        item = self.tree.identify_row(event.y)
+
+        if item:
+            self.tree.selection_set(item)
+
+            self.context_menu.tk_popup(
+                event.x_root,
+                event.y_root
+            )
+
+    def copy_selected_ip(self):
+        selected = self.tree.selection()
+        if selected:
+            ip = self.tree.item(selected[0])["values"][0]
+            self.root.clipboard_clear()
+            self.root.clipboard_append(ip)
+
+    def copy_selected_ip_port(self):
+        selected = self.tree.selection()
+        if selected:
+            values = self.tree.item(selected[0])["values"]
+            if len(values) >= 2:
+                ip = values[0]
+                ports = str(values[1]).replace("，", ",")
+                nodes = [f"{ip}:{p.strip()}" for p in ports.split(",") if p.strip()]
+                self.root.clipboard_clear()
+                self.root.clipboard_append("\n".join(nodes))
+
+    def copy_all_valid_ips(self):
+        valid_items = [
+            self.tree.item(k)["values"][0]
+            for k in self.tree.get_children("")
+            if len(self.tree.item(k)["values"]) >= 4
+            and str(self.tree.item(k)["values"][3]).endswith(" ms")
+        ]
+        if valid_items:
+            self.root.clipboard_clear()
+            self.root.clipboard_append("\n".join(valid_items))
+            messagebox.showinfo("提示", f"已成功复制 {len(valid_items)} 个可用 IP 到剪贴板！")
+
+    def copy_all_valid_ip_ports(self):
+        ip_ports = []
+        for k in self.tree.get_children(""):
+            values = self.tree.item(k)["values"]
+            if len(values) < 4 or not str(values[3]).endswith(" ms"):
+                continue
+            ip = str(values[0]).strip()
+            ports = str(values[1]).replace("，", ",")
+            for p in ports.split(","):
+                p = p.strip()
+                if p:
+                    ip_ports.append(f"{ip}:{p}")
+        if ip_ports:
+            self.root.clipboard_clear()
+            self.root.clipboard_append("\n".join(ip_ports))
+            messagebox.showinfo("提示", f"已成功复制 {len(ip_ports)} 个可用 IP:端口 到剪贴板！")
+
+    def on_close(self, event=None):
+        self.closing = True
+        # 关闭软件前再保存一次，确保最后一次拖动表头也不会丢失。
+        self._save_column_widths_after_drag()
+        if self.running:
+            self.pause_scan()
+        else:
+            # 关闭软件也保存最后一次累计计时；只有“清空列表”才会删除断点并清零。
+            self.save_scan_checkpoint(force=True)
+        self.root.destroy()
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = NirSoftCFScanner(root)
+    root.mainloop()
