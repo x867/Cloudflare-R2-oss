@@ -3673,9 +3673,9 @@ class NirSoftCFScanner:
         self.tree.focus(item_id)
 
         column = self.tree.identify_column(event.x)
-        if column == "#5":
+        if column == "#6"
             values = self.tree.item(item_id)["values"]
-            if len(values) < 4:
+            if len(values) < 5:
                 return
 
             ip = str(values[0]).strip()
