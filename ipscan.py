@@ -82,6 +82,9 @@ class NirSoftCFScanner:
         self.saved_subnets = ""
         self.saved_ports = ""
         self.saved_workers = ""
+        self.transport_protocol = "ws"
+        self.xhttp_path = "/kavir"
+        self.xhttp_mode = "stream-one"
         # 主窗口表头宽度持久化，单位为像素。
         self.column_widths = {
             "ip": 175,
@@ -418,6 +421,33 @@ class NirSoftCFScanner:
         self.config_sni_uuid_entry.bind("<Delete>", self._config_delete_current_line)
         self.config_sni_uuid_entry.bind("<Control-v>", self._config_paste_next_line)
         self.config_sni_uuid_entry.bind("<Shift-Insert>", self._config_paste_next_line)
+
+        xhttp_frame = tk.Frame(cfg_form, bg="#f4f4f4")
+        xhttp_frame.grid(row=4, column=1, columnspan=3, sticky="w", pady=(2, 8))
+        tk.Label(xhttp_frame, text="传输协议", bg="#f4f4f4",
+                 font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 8))
+        self.config_protocol_var = tk.StringVar(value=self.transport_protocol)
+        self.config_protocol_combo = ttk.Combobox(
+            xhttp_frame, textvariable=self.config_protocol_var,
+            values=("ws", "xhttp"), state="readonly", width=9
+        )
+        self.config_protocol_combo.pack(side="left")
+        self.config_protocol_combo.bind("<<ComboboxSelected>>", self._on_protocol_changed)
+        tk.Label(xhttp_frame, text="XHTTP Path", bg="#f4f4f4",
+                 font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(18, 8))
+        self.config_xhttp_path_entry = ttk.Entry(xhttp_frame, width=22)
+        self.config_xhttp_path_entry.pack(side="left")
+        self.config_xhttp_path_entry.insert(0, self.xhttp_path)
+        tk.Label(xhttp_frame, text="Mode", bg="#f4f4f4",
+                 font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(12, 8))
+        self.config_xhttp_mode_var = tk.StringVar(value=self.xhttp_mode)
+        self.config_xhttp_mode_combo = ttk.Combobox(
+            xhttp_frame, textvariable=self.config_xhttp_mode_var,
+            values=("stream-one", "auto", "stream-up", "packet-up"),
+            state="readonly", width=12
+        )
+        self.config_xhttp_mode_combo.pack(side="left")
+        self._on_protocol_changed()
 
         # ====================================================
         # 规则设置页：直接覆盖整个 IP 结果区域，暂只搭页面框架
@@ -1069,6 +1099,11 @@ class NirSoftCFScanner:
                 self.saved_subnets = parser.get("Scan", "subnets", fallback="").strip()
                 self.saved_ports = parser.get("Scan", "ports", fallback="").strip()
                 self.saved_workers = parser.get("Scan", "workers", fallback="").strip()
+                self.transport_protocol = parser.get("Scan", "protocol", fallback="ws").strip().lower() or "ws"
+                if self.transport_protocol not in ("ws", "xhttp"):
+                    self.transport_protocol = "ws"
+                self.xhttp_path = parser.get("Scan", "xhttp_path", fallback="/kavir").strip() or "/kavir"
+                self.xhttp_mode = parser.get("Scan", "xhttp_mode", fallback="stream-one").strip() or "stream-one"
 
                 # 读取上次用户拖动后的主窗口表头宽度。
                 for col, default_width in self.column_widths.items():
@@ -1119,6 +1154,9 @@ class NirSoftCFScanner:
             "subnets": ",".join(subnet_lines),
             "ports": self.config_port_entry.get().strip(),
             "workers": self.config_worker_entry.get().strip(),
+            "protocol": str(getattr(self, "transport_protocol", "ws")).strip().lower() or "ws",
+            "xhttp_path": str(getattr(self, "xhttp_path", "/kavir")).strip() or "/kavir",
+            "xhttp_mode": str(getattr(self, "xhttp_mode", "stream-one")).strip() or "stream-one",
         }
         for i, item in enumerate(self.node_configs[:6], 1):
             section = f"Account{i}"
@@ -1494,6 +1532,14 @@ class NirSoftCFScanner:
 
     def _config_read_current(self):
         """读取六个 SNI/域名；公共 UUID 只读取一次并应用到六个子账户。"""
+        if hasattr(self, "config_protocol_var"):
+            self.transport_protocol = str(self.config_protocol_var.get()).strip().lower() or "ws"
+            if self.transport_protocol not in ("ws", "xhttp"):
+                self.transport_protocol = "ws"
+            self.xhttp_path = self.config_xhttp_path_entry.get().strip() or "/kavir"
+            if not self.xhttp_path.startswith("/"):
+                self.xhttp_path = "/" + self.xhttp_path
+            self.xhttp_mode = str(self.config_xhttp_mode_var.get()).strip() or "stream-one"
         raw = "" if getattr(self, "_sni_uuid_placeholder_active", False) else self.config_sni_uuid_entry.get("1.0", "end-1c")
         configs = []
         shared_uuid = ""
@@ -1734,6 +1780,12 @@ class NirSoftCFScanner:
             entry.delete(0, "end")
             entry.insert(0, value)
 
+        self.config_protocol_var.set(getattr(self, "transport_protocol", "ws"))
+        self.config_xhttp_path_entry.delete(0, "end")
+        self.config_xhttp_path_entry.insert(0, getattr(self, "xhttp_path", "/kavir"))
+        self.config_xhttp_mode_var.set(getattr(self, "xhttp_mode", "stream-one"))
+        self._on_protocol_changed()
+
         self.config_mode = True
         self.config_readonly = readonly
         self._config_show_current()
@@ -1744,6 +1796,9 @@ class NirSoftCFScanner:
         self.config_worker_entry.config(state=entry_state)
         self.config_subnet_entry.config(state="disabled" if readonly else "normal")
         self.config_sni_uuid_entry.config(state="disabled" if readonly else "normal")
+        self.config_protocol_combo.config(state="disabled" if readonly else "readonly")
+        self.config_xhttp_path_entry.config(state="disabled" if readonly else "normal")
+        self.config_xhttp_mode_combo.config(state="disabled" if readonly else "readonly")
 
         self.config_overlay.place(x=0, y=0, relwidth=1.0, relheight=1.0)
         self.config_overlay.lift()
@@ -1759,6 +1814,9 @@ class NirSoftCFScanner:
         self.config_worker_entry.config(state="normal")
         self.config_subnet_entry.config(state="normal")
         self.config_sni_uuid_entry.config(state="normal")
+        self.config_protocol_combo.config(state="readonly")
+        self.config_xhttp_path_entry.config(state="normal")
+        self.config_xhttp_mode_combo.config(state="readonly")
 
         # 返回统一回到 IP 主窗口，不进入其他配置页面。
         self.config_overlay.place_forget()
@@ -2058,11 +2116,26 @@ class NirSoftCFScanner:
         # 无论有没有输入，都覆盖模板里的 SNI。
         tls["serverName"] = sni
 
-        if stream.get("network") == "ws":
+        protocol = str(getattr(self, "transport_protocol", "ws")).strip().lower()
+        if protocol == "xhttp":
+            stream["network"] = "xhttp"
+            stream["xhttpSettings"] = {
+                "host": sni,
+                "path": str(getattr(self, "xhttp_path", "/kavir")).strip() or "/kavir",
+                "mode": str(getattr(self, "xhttp_mode", "stream-one")).strip() or "stream-one",
+            }
+            stream.pop("wsSettings", None)
+        elif stream.get("network") == "ws":
             ws = stream.setdefault("wsSettings", {})
             headers = ws.setdefault("headers", {})
-            # 同样清掉模板可能残留的 Host，避免继续使用内置 SNI。
+            # 同样清掉模板可能残留的 Host。
             headers["Host"] = sni
+
+    def _on_protocol_changed(self, event=None):
+        protocol = str(self.config_protocol_var.get()).strip().lower()
+        enabled = protocol == "xhttp"
+        self.config_xhttp_path_entry.config(state="normal" if enabled else "disabled")
+        self.config_xhttp_mode_combo.config(state="readonly" if enabled else "disabled")
 
     def set_inputs_state(self, enabled):
         state = "normal" if enabled else "disabled"
@@ -2110,7 +2183,18 @@ class NirSoftCFScanner:
                 {}
             )
 
-            if stream_settings.get("network") == "ws":
+            protocol = str(getattr(self, "transport_protocol", "ws")).strip().lower()
+            if protocol == "xhttp":
+                stream_settings["network"] = "xhttp"
+                tls_settings = stream_settings.setdefault("tlsSettings", {})
+                server_name = str(tls_settings.get("serverName", "")).strip() if isinstance(tls_settings, dict) else ""
+                stream_settings["xhttpSettings"] = {
+                    "host": server_name,
+                    "path": str(getattr(self, "xhttp_path", "/kavir")).strip() or "/kavir",
+                    "mode": str(getattr(self, "xhttp_mode", "stream-one")).strip() or "stream-one",
+                }
+                stream_settings.pop("wsSettings", None)
+            elif stream_settings.get("network") == "ws":
                 ws_settings = stream_settings.setdefault(
                     "wsSettings",
                     {}
