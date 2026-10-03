@@ -3647,6 +3647,7 @@ class NirSoftCFScanner:
         titles = {
             "ip": "IP 地址",
             "ports": "可用端口",
+            "protocol": "协议",
             "tcp": "TCP 延迟",
             "xray": "Xray 真延迟",
             "speed": "下载测速"
@@ -3739,7 +3740,7 @@ class NirSoftCFScanner:
             0,
             lambda: self.tree.item(
                 item_id,
-                values=(ip, "测试中...", "重新测试中...", "Xray测速中...", "-"),
+                values=(ip, "测试中...", "测试中...", "重新测试中...", "Xray测速中...", "-"),
                 tags=("testing",)
             )
         )
@@ -3777,7 +3778,7 @@ class NirSoftCFScanner:
                 0,
                 lambda: self.tree.item(
                     item_id,
-                    values=(ip, "无可用端口", "失败", "失败", "-"),
+                    values=(ip, "无可用端口", "无", "失败", "失败", "-"),
                     tags=("fail",)
                 ) if self.tree.exists(item_id) else None
             )
