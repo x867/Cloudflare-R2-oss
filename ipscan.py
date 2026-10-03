@@ -3751,19 +3751,25 @@ class NirSoftCFScanner:
             if not tcp_ok:
                 continue
             try:
-                xray_delay, xray_ok = self.run_isolated_xray_test(ip, port, manual_retest=True)
+                protocol = str(getattr(self, "transport_protocol", "ws")).lower()
+                xray_delay, xray_ok = self.run_isolated_xray_test(ip, port, manual_retest=True, protocol=protocol)
             except Exception as e:
                 print("独立重测异常:", e)
                 xray_delay, xray_ok = None, False
             if xray_ok and xray_delay is not None:
-                valid.append((port, tcp_delay, xray_delay))
+                valid.append((port, tcp_delay, xray_delay, protocol))
 
         if valid:
             valid.sort(key=lambda x: x[2])
             best = valid[0]
+            protocols = []
+            for x in valid:
+                if x[3] not in protocols:
+                    protocols.append(x[3])
             values = (
                 ip,
                 ", ".join(str(x[0]) for x in valid),
+                ", ".join("XHTTP" if str(p).lower() == "xhttp" else "WS" for p in protocols),
                 f"{best[1]} ms",
                 f"{best[2]} ms",
                 "测速"
