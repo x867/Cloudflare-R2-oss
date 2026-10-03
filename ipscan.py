@@ -705,7 +705,13 @@ class NirSoftCFScanner:
 
             for row in data.get("results", []):
                 ip = str(row.get("ip", "")).strip()
-                values = row.get("values", [])
+                values = list(row.get("values", []))
+                # 兼容旧版扫描断点：旧数据只有 5 列，没有“协议”列。
+                # 新表头增加协议列后，必须在端口后补一个协议占位，避免整行错位。
+                if len(values) == 5:
+                    values.insert(2, "")
+                elif len(values) > 6:
+                    values = values[:6]
                 if ip and values:
                     self.tree.insert("", "end", iid=ip, values=tuple(values), tags=("good",))
 
