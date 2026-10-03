@@ -83,15 +83,19 @@ class NirSoftCFScanner:
         self.saved_ports = ""
         self.saved_workers = ""
         self.transport_protocol = "ws"
+        self.xhttp_enabled = True
         self.xhttp_path = "/kavir"
         self.xhttp_mode = "stream-one"
+        self.xhttp_alpn = "h2"
+        self.xhttp_fingerprint = "firefox"
         # 主窗口表头宽度持久化，单位为像素。
         self.column_widths = {
             "ip": 175,
-            "ports": 185,
-            "tcp": 135,
-            "xray": 145,
-            "speed": 145,
+            "ports": 170,
+            "protocol": 90,
+            "tcp": 125,
+            "xray": 135,
+            "speed": 135,
         }
 
         # Cloudflare 六账户额度读取配置。Token 不写入代码，首次使用时在“CF额度”中填写。
@@ -243,7 +247,7 @@ class NirSoftCFScanner:
         container = ttk.Frame(self.root, padding=(5, 0, 5, 5))
         container.pack(fill="both", expand=True)
 
-        columns = ("ip", "ports", "tcp", "xray", "speed")
+        columns = ("ip", "ports", "protocol", "tcp", "xray", "speed")
 
         # 列表区域：Treeview + 内嵌式滚动条
         tree_area = tk.Frame(
@@ -275,6 +279,7 @@ class NirSoftCFScanner:
         headings = {
             "ip": "IP 地址",
             "ports": "可用端口",
+            "protocol": "协议",
             "tcp": "TCP 延迟",
             "xray": "Xray 真延迟",
             "speed": "下载测速"
@@ -424,7 +429,7 @@ class NirSoftCFScanner:
 
         xhttp_frame = tk.Frame(cfg_form, bg="#f4f4f4")
         xhttp_frame.grid(row=4, column=1, columnspan=3, sticky="w", pady=(2, 8))
-        tk.Label(xhttp_frame, text="传输协议", bg="#f4f4f4",
+        tk.Label(xhttp_frame, text="扫描协议", bg="#f4f4f4",
                  font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 8))
         self.config_protocol_var = tk.StringVar(value=self.transport_protocol)
         self.config_protocol_combo = ttk.Combobox(
@@ -433,6 +438,8 @@ class NirSoftCFScanner:
         )
         self.config_protocol_combo.pack(side="left")
         self.config_protocol_combo.bind("<<ComboboxSelected>>", self._on_protocol_changed)
+        self.config_xhttp_enabled_var = tk.BooleanVar(value=self.xhttp_enabled)
+        ttk.Checkbutton(xhttp_frame, text="同时扫描 XHTTP", variable=self.config_xhttp_enabled_var).pack(side="left", padx=(12, 0))
         tk.Label(xhttp_frame, text="XHTTP Path", bg="#f4f4f4",
                  font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(18, 8))
         self.config_xhttp_path_entry = ttk.Entry(xhttp_frame, width=22)
@@ -984,6 +991,13 @@ class NirSoftCFScanner:
 
         self.results.clear()
         self.scan_ports = ports
+        self.scan_protocols = []
+        base_protocol = str(getattr(self, "transport_protocol", "ws")).strip().lower()
+        if base_protocol not in ("ws", "xhttp"):
+            base_protocol = "ws"
+        self.scan_protocols.append(base_protocol)
+        if getattr(self, "xhttp_enabled", True) and "xhttp" not in self.scan_protocols:
+            self.scan_protocols.append("xhttp")
         self.ip_scan_states = {}
         with self.speed_lock:
             self.speed_testing.clear()
@@ -1102,6 +1116,7 @@ class NirSoftCFScanner:
                 self.transport_protocol = parser.get("Scan", "protocol", fallback="ws").strip().lower() or "ws"
                 if self.transport_protocol not in ("ws", "xhttp"):
                     self.transport_protocol = "ws"
+                self.xhttp_enabled = parser.getboolean("Scan", "xhttp_enabled", fallback=True)
                 self.xhttp_path = parser.get("Scan", "xhttp_path", fallback="/kavir").strip() or "/kavir"
                 self.xhttp_mode = parser.get("Scan", "xhttp_mode", fallback="stream-one").strip() or "stream-one"
 
@@ -1155,6 +1170,7 @@ class NirSoftCFScanner:
             "ports": self.config_port_entry.get().strip(),
             "workers": self.config_worker_entry.get().strip(),
             "protocol": str(getattr(self, "transport_protocol", "ws")).strip().lower() or "ws",
+            "xhttp_enabled": str(bool(getattr(self, "xhttp_enabled", True))),
             "xhttp_path": str(getattr(self, "xhttp_path", "/kavir")).strip() or "/kavir",
             "xhttp_mode": str(getattr(self, "xhttp_mode", "stream-one")).strip() or "stream-one",
         }
@@ -1177,7 +1193,7 @@ class NirSoftCFScanner:
         """保存主窗口 Treeview 当前表头宽度。"""
         try:
             changed = False
-            for col in ("ip", "ports", "tcp", "xray", "speed"):
+            for col in ("ip", "ports", "protocol", "tcp", "xray", "speed"):
                 width = int(self.tree.column(col, "width"))
                 if 60 <= width <= 1000:
                     if self.column_widths.get(col) != width:
@@ -1536,6 +1552,7 @@ class NirSoftCFScanner:
             self.transport_protocol = str(self.config_protocol_var.get()).strip().lower() or "ws"
             if self.transport_protocol not in ("ws", "xhttp"):
                 self.transport_protocol = "ws"
+            self.xhttp_enabled = bool(self.config_xhttp_enabled_var.get())
             self.xhttp_path = self.config_xhttp_path_entry.get().strip() or "/kavir"
             if not self.xhttp_path.startswith("/"):
                 self.xhttp_path = "/" + self.xhttp_path
@@ -2091,7 +2108,7 @@ class NirSoftCFScanner:
         return {"account": self.config_index+1, "uuid": str(node.get("uuid", "")).strip(),
                 "snis": snis, "sni": snis[0] if snis else ""}
 
-    def apply_node_config(self, config, node_override=None):
+    def apply_node_config(self, config, node_override=None, protocol_override=None):
         """把 UUID/SNI 应用到 Xray 配置；空值会清除模板中的内置值。"""
         node = node_override if node_override is not None else self.get_active_node_config()
         uuid = str(node.get("uuid", "")).strip()
@@ -2116,7 +2133,7 @@ class NirSoftCFScanner:
         # 无论有没有输入，都覆盖模板里的 SNI。
         tls["serverName"] = sni
 
-        protocol = str(getattr(self, "transport_protocol", "ws")).strip().lower()
+        protocol = str(protocol_override or getattr(self, "transport_protocol", "ws")).strip().lower()
         if protocol == "xhttp":
             stream["network"] = "xhttp"
             stream["xhttpSettings"] = {
@@ -2124,6 +2141,8 @@ class NirSoftCFScanner:
                 "path": str(getattr(self, "xhttp_path", "/kavir")).strip() or "/kavir",
                 "mode": str(getattr(self, "xhttp_mode", "stream-one")).strip() or "stream-one",
             }
+            tls["alpn"] = [str(getattr(self, "xhttp_alpn", "h2")).strip() or "h2"]
+            tls["fingerprint"] = str(getattr(self, "xhttp_fingerprint", "firefox")).strip() or "firefox"
             stream.pop("wsSettings", None)
         elif stream.get("network") == "ws":
             ws = stream.setdefault("wsSettings", {})
@@ -2340,9 +2359,11 @@ class NirSoftCFScanner:
                     break
 
                 with self.index_lock:
+                    pending_count = len(tcp_successes) * max(1, len(getattr(self, "scan_protocols", ["ws"])))
                     self.ip_scan_states[ip] = {
-                        "pending": len(tcp_successes),
+                        "pending": pending_count,
                         "ports": [],
+                        "protocols": set(),
                         "tcp_successes": list(tcp_successes),
                         "best_delay": None,
                         "best_tcp": None,
@@ -2353,13 +2374,14 @@ class NirSoftCFScanner:
                     continue
 
                 for target_port, tcp_delay in tcp_successes:
-                    task = (ip, target_port, tcp_delay)
-                    while not self.scan_stop_event.is_set():
-                        try:
-                            self.xray_task_queue.put(task, timeout=0.1)
-                            break
-                        except queue.Full:
-                            continue
+                    for protocol in getattr(self, "scan_protocols", ["ws"]):
+                        task = (ip, target_port, tcp_delay, protocol)
+                        while not self.scan_stop_event.is_set():
+                            try:
+                                self.xray_task_queue.put(task, timeout=0.1)
+                                break
+                            except queue.Full:
+                                continue
 
             except Exception as e:
                 print("TCP 扫描线程异常:", e)
@@ -2370,7 +2392,7 @@ class NirSoftCFScanner:
         # 10 路独立 Xray。每个 TCP 成功端口分别做真延迟，结果回收到同一个 IP。
         while not self.scan_stop_event.is_set():
             try:
-                ip, target_port, tcp_delay = self.xray_task_queue.get(timeout=0.2)
+                ip, target_port, tcp_delay, protocol = self.xray_task_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
 
@@ -2378,16 +2400,16 @@ class NirSoftCFScanner:
                 if self.scan_stop_event.is_set():
                     continue
 
-                xray_delay, xray_ok = self.run_isolated_xray_test(ip, target_port)
+                xray_delay, xray_ok = self.run_isolated_xray_test(ip, target_port, protocol=protocol)
                 self.result_queue.put((
-                    "port_done", ip, target_port, tcp_delay, xray_delay, xray_ok
+                    "port_done", ip, target_port, tcp_delay, xray_delay, xray_ok, protocol
                 ))
 
             except Exception as e:
                 print("Xray Worker 异常:", e)
                 try:
                     self.result_queue.put((
-                        "port_done", ip, target_port, tcp_delay, None, False
+                        "port_done", ip, target_port, tcp_delay, None, False, protocol
                     ))
                 except Exception:
                     pass
@@ -2398,7 +2420,7 @@ class NirSoftCFScanner:
                 except Exception:
                     pass
 
-    def run_isolated_xray_test(self, target_ip, target_port, manual_retest=False):
+    def run_isolated_xray_test(self, target_ip, target_port, manual_retest=False, protocol=None):
         """启动独立 Xray 测试。
 
         v2rayN 日志里的“Unables to find local process name”属于 v2rayN
@@ -2413,7 +2435,8 @@ class NirSoftCFScanner:
                 config = json.load(f)
 
             scheduled_node = self._next_cf_node_config()
-            self.apply_node_config(config, scheduled_node)
+            test_protocol = str(protocol or getattr(self, "transport_protocol", "ws")).strip().lower()
+            self.apply_node_config(config, scheduled_node, protocol_override=test_protocol)
 
             # 为每个 Xray 实例分配独立 SOCKS 端口，避免 10 路互相抢端口。
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -2453,7 +2476,15 @@ class NirSoftCFScanner:
             tls = stream.get("tlsSettings")
             if isinstance(tls, dict):
                 tls.pop("allowInsecure", None)
-            if stream.get("network") == "ws":
+            if stream.get("network") == "xhttp":
+                xhttp_settings = stream.setdefault("xhttpSettings", {})
+                xhttp_settings["host"] = str(tls.get("serverName", "")).strip() if isinstance(tls, dict) else ""
+                xhttp_settings["path"] = str(getattr(self, "xhttp_path", "/kavir")).strip() or "/kavir"
+                xhttp_settings["mode"] = str(getattr(self, "xhttp_mode", "stream-one")).strip() or "stream-one"
+                if isinstance(tls, dict):
+                    tls["alpn"] = [str(getattr(self, "xhttp_alpn", "h2")).strip() or "h2"]
+                    tls["fingerprint"] = str(getattr(self, "xhttp_fingerprint", "firefox")).strip() or "firefox"
+            elif stream.get("network") == "ws":
                 ws_settings = stream.setdefault("wsSettings", {})
                 ws_settings.setdefault("path", "/")
 
@@ -3360,9 +3391,9 @@ class NirSoftCFScanner:
         if not self.tree.exists(item_id):
             return
         values = list(self.tree.item(item_id)["values"])
-        while len(values) < 5:
+        while len(values) < 6:
             values.append("-")
-        values[4] = text
+        values[5] = text
         if text == "测速中...":
             tag = "testing"
         elif text == "失败":
@@ -3401,14 +3432,15 @@ class NirSoftCFScanner:
                 continue
 
             if msg[0] == "port_done":
-                _, ip, target_port, tcp_delay, xray_delay, xray_ok = msg
+                _, ip, target_port, tcp_delay, xray_delay, xray_ok, protocol = msg
                 state = self.ip_scan_states.get(ip)
                 if state is None:
                     continue
 
                 state["pending"] -= 1
                 if xray_ok and xray_delay is not None:
-                    state["ports"].append((target_port, tcp_delay, xray_delay))
+                    state["ports"].append((target_port, tcp_delay, xray_delay, protocol))
+                    state["protocols"].add(protocol)
                     if (
                         state["best_delay"] is None
                         or xray_delay < state["best_delay"]
@@ -3422,10 +3454,18 @@ class NirSoftCFScanner:
                     if valid:
                         self.success += 1
                         valid.sort(key=lambda x: x[2])
-                        ports = [x[0] for x in valid]
+                        ports = []
+                        for x in valid:
+                            if x[0] not in ports:
+                                ports.append(x[0])
+                        protocols = []
+                        for _, _, _, proto in valid:
+                            if proto not in protocols:
+                                protocols.append(proto)
                         self._display_ip_result(
                             ip,
                             ports,
+                            protocols,
                             state["best_tcp"],
                             state["best_delay"]
                         )
@@ -3445,10 +3485,12 @@ class NirSoftCFScanner:
 
         self.root.after(80, self.update_results)
 
-    def _display_ip_result(self, ip, ports, tcp_delay, xray_delay):
+    def _display_ip_result(self, ip, ports, protocols, tcp_delay, xray_delay):
+        protocol_text = ", ".join("XHTTP" if str(p).lower() == "xhttp" else "WS" for p in protocols)
         values = (
             ip,
             ", ".join(str(p) for p in ports),
+            protocol_text,
             f"{tcp_delay:.1f} ms" if isinstance(tcp_delay, (int, float)) else "-",
             f"{xray_delay} ms" if xray_delay is not None else "失败",
             "测速"
@@ -3461,8 +3503,8 @@ class NirSoftCFScanner:
             )
         else:
             old = list(self.tree.item(ip)["values"])
-            speed = old[4] if len(old) >= 5 else "测速"
-            values = values[:4] + (speed,)
+            speed = old[5] if len(old) >= 6 else "测速"
+            values = values[:5] + (speed,)
             self.tree.item(ip, values=values, tags=(row_tag,))
 
         # 新节点进入主 IP 框后，默认按“前1段+前2段+前3段”分组，
@@ -3575,20 +3617,23 @@ class NirSoftCFScanner:
                         ports.append(int(p))
                 return tuple(sorted(ports)) if ports else (99999,)
 
-            if column == "tcp":
-                text = str(values[2]).strip()
-                if text.endswith(" ms"):
-                    return (0, float(text[:-3].strip()))
-                return (1, 99999.0)
+            if column == "protocol":
+                return str(values[2]).lower()
 
-            if column == "xray":
+            if column == "tcp":
                 text = str(values[3]).strip()
                 if text.endswith(" ms"):
                     return (0, float(text[:-3].strip()))
                 return (1, 99999.0)
 
+            if column == "xray":
+                text = str(values[4]).strip()
+                if text.endswith(" ms"):
+                    return (0, float(text[:-3].strip()))
+                return (1, 99999.0)
+
             if column == "speed":
-                text = str(values[4]).strip() if len(values) >= 5 else "-"
+                text = str(values[5]).strip() if len(values) >= 5 else "-"
                 if text.endswith(" MB/s"):
                     return (0, float(text[:-5].strip()) * 1024 * 1024)
                 if text.endswith(" KB/s"):
@@ -4691,11 +4736,11 @@ class NirSoftCFScanner:
         result = []
         for item_id in self.tree.get_children(""):
             values = self.tree.item(item_id)["values"]
-            if len(values) < 4:
+            if len(values) < 5:
                 continue
             ip = str(values[0]).strip()
             ports_text = str(values[1]).strip()
-            xray_value = str(values[3]).strip()
+            xray_value = str(values[4]).strip()
             if not ip or not xray_value.endswith(" ms"):
                 continue
             for raw_port in ports_text.replace("，", ",").split(","):
@@ -5034,11 +5079,11 @@ class NirSoftCFScanner:
         for item_id in self.tree.get_children(""):
             values = self.tree.item(item_id)["values"]
 
-            if len(values) < 5:
+            if len(values) < 6:
                 continue
 
             ip = str(values[0]).strip()
-            speed = str(values[4]).strip()
+            speed = str(values[5]).strip()
 
             # 只复制已经完成下载测速并显示速度的 IP。
             # “测速”/空白/错误状态不计入。
@@ -5097,7 +5142,7 @@ class NirSoftCFScanner:
         ip_ports = []
         for k in self.tree.get_children(""):
             values = self.tree.item(k)["values"]
-            if len(values) < 4 or not str(values[3]).endswith(" ms"):
+            if len(values) < 5 or not str(values[4]).endswith(" ms"):
                 continue
             ip = str(values[0]).strip()
             ports = str(values[1]).replace("，", ",")
