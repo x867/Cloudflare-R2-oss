@@ -50,6 +50,7 @@ class NirSoftCFScanner:
         self.result_queue = queue.Queue()
 
         self.results = {}
+        self.result_protocols = {}
         self.ip_list = []
 
         self.total = 0
@@ -990,6 +991,7 @@ class NirSoftCFScanner:
                 self.next_index += 1
 
         self.results.clear()
+        self.result_protocols.clear()
         self.scan_ports = ports
         self.scan_protocols = []
         base_protocol = str(getattr(self, "transport_protocol", "ws")).strip().lower()
@@ -3100,7 +3102,7 @@ class NirSoftCFScanner:
                 pass
             raise
 
-    def download_speed_test(self, ip, port, item_id):
+    def download_speed_test(self, ip, port, item_id, protocol=None):
         """
         独立 Xray 下载测速。
 
@@ -3130,7 +3132,7 @@ class NirSoftCFScanner:
                 if self.tree.exists(item_id) else None
             )
 
-            process, socks_port, config_path = self.create_speed_xray(ip, port)
+            process, socks_port, config_path = self.create_speed_xray(ip, port, protocol=protocol)
 
             if not self.wait_speed_xray_ready(process, socks_port, 5.0):
                 raise RuntimeError("Xray 启动失败")
@@ -3285,7 +3287,7 @@ class NirSoftCFScanner:
             with self.speed_lock:
                 self.speed_testing.discard(item_id)
 
-    def create_speed_xray(self, target_ip, target_port):
+    def create_speed_xray(self, target_ip, target_port, protocol=None):
         """创建专用于下载测速的独立 Xray。"""
         base = os.path.dirname(os.path.abspath(__file__))
         xray_path = os.path.join(base, "xray.exe")
@@ -3296,7 +3298,10 @@ class NirSoftCFScanner:
 
         # 下载测速也必须使用当前六账户轮换节点，不能回退到账户1。
         scheduled_node = self._next_cf_node_config()
-        self.apply_node_config(config, scheduled_node)
+        speed_protocol = str(protocol or getattr(self, "transport_protocol", "ws")).strip().lower()
+        if speed_protocol not in ("ws", "xhttp"):
+            speed_protocol = "ws"
+        self.apply_node_config(config, scheduled_node, protocol_override=speed_protocol)
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
@@ -3424,7 +3429,7 @@ class NirSoftCFScanner:
                 self.tested += 1
                 if ports:
                     self.success += 1
-                    self._display_ip_result(ip, ports, best_tcp, best_xray)
+                    self._display_ip_result(ip, ports, [], best_tcp, best_xray)
                 self.ip_scan_states.pop(ip, None)
                 self.completed_ips.add(ip)
                 self.save_scan_checkpoint()
@@ -3469,6 +3474,14 @@ class NirSoftCFScanner:
                             state["best_tcp"],
                             state["best_delay"]
                         )
+
+                        by_port = {}
+                        for port, tcp_value, xray_value, proto in valid:
+                            old = by_port.get(port)
+                            if old is None or xray_value < old[1]:
+                                by_port[port] = (proto, xray_value)
+                        for port, (proto, _) in by_port.items():
+                            self.result_protocols[(ip, int(port))] = proto
                     # TCP 成功但 Xray 实测失败的节点不进入主列表。
                     # 主列表只显示真正通过 Xray 实测的可用节点。
                     self.ip_scan_states.pop(ip, None)
@@ -3694,9 +3707,10 @@ class NirSoftCFScanner:
                 return
 
             # 可用端口已经按 Xray 真延迟排序，第一项为当前最佳端口。
+            speed_protocol = self.result_protocols.get((ip, ports[0]))
             threading.Thread(
                 target=self.download_speed_test,
-                args=(ip, ports[0], item_id),
+                args=(ip, ports[0], item_id, speed_protocol),
                 daemon=True
             ).start()
             return
